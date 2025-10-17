@@ -56,8 +56,6 @@ if self.global_pool:
 if self.global_pool:
     x = x[:, 1:, :]
     x = torch.nn.functional.adaptive_avg_pool1d(x.permute(0, 2, 1), 576).permute(0, 2, 1)
-    # Pad from (576, 768) to (576, 1024)
-    x = torch.nn.functional.pad(x, (0, 256), mode='constant', value=0)
     outcome = self.norm(x)
 ```
 

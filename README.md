@@ -63,9 +63,9 @@ if self.global_pool:
 
 Replaced global average pooling with `adaptive_avg_pool1d` to compress sequence length to a fixed 576 tokens. The output dimension is (576, 768), which is then padded with zeros to (576, 1024) for downstream processing.
 
-#### **Trident-Based Feature Extraction (Recommended Method)**
+#### 🔱 Trident-Based Feature Extraction (Recommended Method)
 
-You can use **[Trident](https://github.com/mahmoodlab/Trident)**, a toolkit for large-scale whole-slide image processing, to load different pathology foundation models (such as **Titan** and **Prov-Gigapath**) and extract features from whole-slide images. The extracted features have a shape of **(576, xx)**, which can then be padded with zeros to **(576, 1024)** and saved as **.pt files** for **model training and inference**.
+You can also use **[Trident](https://github.com/mahmoodlab/Trident)**, a toolkit for large-scale whole-slide image processing, to load different pathology foundation models (such as **Titan** and **Prov-Gigapath**) and extract features from whole-slide images. The extracted features have a shape of **(576, xx)**, which can then be padded with zeros to **(576, 1024)** and saved as **.pt files** for **model training and inference**.
 
 
 

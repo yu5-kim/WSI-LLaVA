@@ -91,7 +91,7 @@ Run the following script for model inference:
 ./WSI_LLAVA/scripts/wsi-vqa.sh
 ```
 
-⬇️ You can obtain the model weights from **[Hugging Face: Lucas-yuc/WSI-LLaVA-7b](https://huggingface.co/Lucas-yuc/WSI-LLaVA-7b)**.
+⬇️ Because there were issues with the previous model weights, we have re-uploaded updated weights as of January 4, 2026. Please re-download them. **[Hugging Face: Lucas-yuc/WSI-LLaVA-7b-14](https://huggingface.co/Lucas-yuc/wsi-llava-v1.5-7b-14)**.
 
 🧪 You can use this file for testing: [WSI-Bench Open Questions](https://huggingface.co/datasets/Lucas-yuc/WSI-Bench/blob/main/WSI-Bench-open-question.jsonl).
 

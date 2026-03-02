@@ -91,7 +91,20 @@ Run the following script for model inference:
 ./WSI_LLAVA/scripts/wsi-vqa.sh
 ```
 
-⬇️ Because there were issues with the previous model weights, we have re-uploaded updated weights as of January 4, 2026. Please re-download them. **[Hugging Face: Lucas-yuc/WSI-LLaVA-7b-14](https://huggingface.co/Lucas-yuc/wsi-llava-v1.5-7b-14)**.
+⬇️ **Important Notice (March 2026)**  
+
+We sincerely apologize for the confusion caused by our previous weight release.
+
+The previously uploaded checkpoint corresponds to an improved version of the model that achieves better performance than the results reported in the paper. Therefore, it does not exactly reproduce the experimental results described in the publication.
+
+If you would like to reproduce the results reported in the paper, please use the following checkpoint:
+
+👉 https://huggingface.co/Lucas-yuc/wsi-llava-v1.5-7b-e1  
+
+The currently available weights (v1.5-7b-14) correspond to the improved model version.
+
+We apologize for the oversight and appreciate your understanding.
+
 
 🧪 You can use this file for testing: [WSI-Bench Open Questions](https://huggingface.co/datasets/Lucas-yuc/WSI-Bench/blob/main/WSI-Bench-open-question.jsonl).
 

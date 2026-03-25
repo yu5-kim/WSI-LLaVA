@@ -2,7 +2,7 @@
 
 <img align="right" width="50%" src="static/image/Dataset_comparison.png" alt="WSI-LLaVA">
 
-🏠 **[Homepage](https://wsi-llava.github.io/)** | 🤗 **[huggingface](https://huggingface.co/datasets/LyuLucas/WSI-Bench)** | 📖 **[Paper](https://arxiv.org/abs/2412.02141)**
+🏠 **[Homepage](https://wsi-llava.github.io/)** | 🤗 **[huggingface](https://huggingface.co/Lucas-yuc/wsi-llava-v1.5-7b-e1)** | 📖 **[Paper](https://arxiv.org/abs/2412.02141)**
 
 **WSI-LLaVA** is a multimodal large language model designed for Whole Slide Image (WSI) analysis, bridging the gap between gigapixel WSIs and textual descriptions. It introduces innovative methods and benchmarks for advancing pathology-focused AI research.
 

@@ -1,6 +1,16 @@
+from .language_model.llava_llama import LlavaLlamaForCausalLM, LlavaConfig
+
 try:
-    from .language_model.llava_llama import LlavaLlamaForCausalLM, LlavaConfig
     from .language_model.llava_mpt import LlavaMptForCausalLM, LlavaMptConfig
+except Exception:
+    pass
+
+try:
     from .language_model.llava_mistral import LlavaMistralForCausalLM, LlavaMistralConfig
-except:
+except Exception:
+    pass
+
+try:
+    from .language_model.llava_qwen3 import LlavaQwen3ForCausalLM, LlavaQwen3Config
+except Exception:
     pass

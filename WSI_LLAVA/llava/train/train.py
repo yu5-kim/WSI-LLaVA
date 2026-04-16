@@ -53,6 +53,7 @@ IS_TOKENIZER_GREATER_THAN_0_14 = version.parse(tokenizers.__version__) >= versio
 @dataclass
 class ModelArguments:
     model_name_or_path: Optional[str] = field(default="facebook/opt-125m")
+    llm_backbone: Optional[str] = field(default="auto")
     version: Optional[str] = field(default="v0")
     freeze_backbone: bool = field(default=False)
     tune_mm_mlp_adapter: bool = field(default=False)
@@ -64,6 +65,22 @@ class ModelArguments:
     mm_use_im_patch_token: bool = field(default=True)
     mm_patch_merge_type: Optional[str] = field(default='flat')
     mm_vision_select_feature: Optional[str] = field(default="patch")
+
+
+def infer_backbone(model_args: ModelArguments) -> str:
+    if model_args.llm_backbone and model_args.llm_backbone != "auto":
+        return model_args.llm_backbone.lower()
+
+    lowered = (model_args.model_name_or_path or "").lower()
+    if "mpt" in lowered:
+        return "mpt"
+    if "mistral" in lowered:
+        return "mistral"
+    if "qwen3" in lowered:
+        return "qwen3"
+    if "qwen2" in lowered or "qwen" in lowered:
+        return "qwen2"
+    return "llama"
 
 
 @dataclass
@@ -828,6 +845,7 @@ def train(attn_implementation=None):
     parser = transformers.HfArgumentParser(
         (ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    backbone = infer_backbone(model_args)
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
 
@@ -851,13 +869,29 @@ def train(attn_implementation=None):
         ))
 
     if model_args.vision_tower is not None:
-        if 'mpt' in model_args.model_name_or_path:
+        if backbone == 'mpt':
             config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
             config.attn_config['attn_impl'] = training_args.mpt_attn_impl
             model = LlavaMptForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
                 config=config,
                 cache_dir=training_args.cache_dir,
+                **bnb_model_from_pretrained_args
+            )
+        elif backbone in ['qwen3', 'qwen2', 'qwen']:
+            model = LlavaQwen3ForCausalLM.from_pretrained(
+                model_args.model_name_or_path,
+                cache_dir=training_args.cache_dir,
+                attn_implementation=attn_implementation,
+                torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
+                **bnb_model_from_pretrained_args
+            )
+        elif backbone == 'mistral':
+            model = LlavaMistralForCausalLM.from_pretrained(
+                model_args.model_name_or_path,
+                cache_dir=training_args.cache_dir,
+                attn_implementation=attn_implementation,
+                torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
                 **bnb_model_from_pretrained_args
             )
         else:
@@ -869,7 +903,7 @@ def train(attn_implementation=None):
                 **bnb_model_from_pretrained_args
             )
     else:
-        model = transformers.LlamaForCausalLM.from_pretrained(
+        model = transformers.AutoModelForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
             attn_implementation=attn_implementation,
@@ -912,12 +946,13 @@ def train(attn_implementation=None):
         rank0_print("Adding LoRA adapters...")
         model = get_peft_model(model, lora_config)
 
-    if 'mpt' in model_args.model_name_or_path:
+    if backbone in ['mpt', 'qwen3', 'qwen2', 'qwen']:
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
             model_max_length=training_args.model_max_length,
-            padding_side="right"
+            padding_side="right",
+            use_fast=True,
         )
     else:
         tokenizer = transformers.AutoTokenizer.from_pretrained(

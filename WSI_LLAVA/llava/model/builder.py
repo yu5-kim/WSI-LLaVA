@@ -93,6 +93,10 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
                 tokenizer = AutoTokenizer.from_pretrained(model_base, use_fast=True)
                 cfg_pretrained = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
                 model = LlavaMptForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=True, config=cfg_pretrained, **kwargs)
+            elif 'qwen3' in model_name.lower() or 'qwen2' in model_name.lower() or 'qwen' in model_name.lower():
+                tokenizer = AutoTokenizer.from_pretrained(model_base, use_fast=True)
+                cfg_pretrained = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+                model = LlavaQwen3ForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=True, config=cfg_pretrained, **kwargs)
             else:
                 tokenizer = AutoTokenizer.from_pretrained(model_base, use_fast=False)
                 cfg_pretrained = AutoConfig.from_pretrained(model_path)
@@ -105,6 +109,13 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             if 'mpt' in model_name.lower():
                 tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
                 model = LlavaMptForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, **kwargs)
+            elif 'qwen3' in model_name.lower() or 'qwen2' in model_name.lower() or 'qwen' in model_name.lower():
+                tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
+                model = LlavaQwen3ForCausalLM.from_pretrained(
+                    model_path,
+                    low_cpu_mem_usage=True,
+                    **kwargs
+                )
             elif 'mistral' in model_name.lower():
                 tokenizer = AutoTokenizer.from_pretrained(model_path)
                 model = LlavaMistralForCausalLM.from_pretrained(
@@ -134,7 +145,7 @@ def load_pretrained_model(model_path, model_base, model_name, load_8bit=False, l
             model.to(torch.float16)
         else:
             use_fast = False
-            if 'mpt' in model_name.lower():
+            if 'mpt' in model_name.lower() or 'qwen3' in model_name.lower() or 'qwen2' in model_name.lower() or 'qwen' in model_name.lower():
                 tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
                 model = AutoModelForCausalLM.from_pretrained(model_path, low_cpu_mem_usage=True, trust_remote_code=True, **kwargs)
             else:

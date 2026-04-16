@@ -170,3 +170,10 @@ class LlavaQwen3ForCausalLM(_QwenForCausalLM, LlavaMetaForCausalLM):
 
 AutoConfig.register("llava_qwen3", LlavaQwen3Config)
 AutoModelForCausalLM.register(LlavaQwen3Config, LlavaQwen3ForCausalLM)
+
+# Naming aliases for project-level readability.
+# The implementation still relies on LLaVA multimodal internals, but these
+# aliases allow callers to use model names without the `Llava` prefix.
+WSIQwen3Config = LlavaQwen3Config
+WSIQwen3Model = LlavaQwen3Model
+WSIQwen3ForCausalLM = LlavaQwen3ForCausalLM

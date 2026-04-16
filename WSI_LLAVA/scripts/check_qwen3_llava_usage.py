@@ -12,11 +12,11 @@ checks = {
     ),
     "builder_routes_qwen_to_llava_adapter": (
         ROOT / "WSI_LLAVA/llava/model/builder.py",
-        ["model = LlavaQwen3ForCausalLM.from_pretrained"],
+        ["model = WSIQwen3ForCausalLM.from_pretrained"],
     ),
     "train_routes_qwen_to_llava_adapter": (
         ROOT / "WSI_LLAVA/llava/train/train.py",
-        ["model = LlavaQwen3ForCausalLM.from_pretrained"],
+        ["model = WSIQwen3ForCausalLM.from_pretrained"],
     ),
 }
 

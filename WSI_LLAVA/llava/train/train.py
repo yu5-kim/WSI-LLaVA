@@ -879,7 +879,7 @@ def train(attn_implementation=None):
                 **bnb_model_from_pretrained_args
             )
         elif backbone in ['qwen3', 'qwen2', 'qwen']:
-            model = LlavaQwen3ForCausalLM.from_pretrained(
+            model = WSIQwen3ForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
                 cache_dir=training_args.cache_dir,
                 attn_implementation=attn_implementation,

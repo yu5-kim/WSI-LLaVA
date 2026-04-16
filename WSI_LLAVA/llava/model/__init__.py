@@ -11,6 +11,11 @@ except Exception:
     pass
 
 try:
-    from .language_model.llava_qwen3 import LlavaQwen3ForCausalLM, LlavaQwen3Config
+    from .language_model.llava_qwen3 import (
+        LlavaQwen3ForCausalLM,
+        LlavaQwen3Config,
+        WSIQwen3ForCausalLM,
+        WSIQwen3Config,
+    )
 except Exception:
     pass

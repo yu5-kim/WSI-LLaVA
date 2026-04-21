@@ -108,6 +108,12 @@ def get_tokenizer_pad_token_id(tokenizer: transformers.PreTrainedTokenizer) -> i
     return int(tokenizer.pad_token_id)
 
 
+def is_qwen_family_tokenizer(tokenizer: transformers.PreTrainedTokenizer) -> bool:
+    class_name = tokenizer.__class__.__name__.lower()
+    name_or_path = str(getattr(tokenizer, "name_or_path", "")).lower()
+    return "qwen" in class_name or "qwen" in name_or_path
+
+
 @dataclass
 class DataArguments:
     data_path: str = field(default=None,
@@ -512,11 +518,12 @@ def preprocess_v1(
 
     # Mask targets
     sep = conv.sep + conv.roles[1] + ": "
+    qwen_tokenizer = is_qwen_family_tokenizer(tokenizer)
     for conversation, target in zip(conversations, targets):
         total_len = int(target.ne(get_tokenizer_pad_token_id(tokenizer)).sum())
 
         rounds = conversation.split(conv.sep2)
-        cur_len = 1
+        cur_len = 0 if qwen_tokenizer else 1
         target[:cur_len] = IGNORE_INDEX
         for i, rou in enumerate(rounds):
             if rou == "":
@@ -531,10 +538,19 @@ def preprocess_v1(
                 round_len = len(tokenizer_image_token(rou, tokenizer))
                 instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 2
             else:
-                round_len = len(tokenizer(rou).input_ids)
-                instruction_len = len(tokenizer(parts[0]).input_ids) - 2
+                if qwen_tokenizer:
+                    round_len = len(tokenizer(rou, add_special_tokens=False).input_ids)
+                    instruction_len = len(tokenizer(parts[0], add_special_tokens=False).input_ids)
+                else:
+                    round_len = len(tokenizer(rou).input_ids)
+                    instruction_len = len(tokenizer(parts[0]).input_ids) - 2
 
-            if i != 0 and not tokenizer.legacy and IS_TOKENIZER_GREATER_THAN_0_14:
+            if (
+                not qwen_tokenizer
+                and i != 0
+                and not tokenizer.legacy
+                and IS_TOKENIZER_GREATER_THAN_0_14
+            ):
                 round_len -= 1
                 instruction_len -= 1
 

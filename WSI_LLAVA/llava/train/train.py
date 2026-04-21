@@ -20,7 +20,7 @@ from dataclasses import dataclass, field, fields
 import json
 import logging
 import pathlib
-from typing import Dict, Optional, Sequence, List
+from typing import Dict, Optional, Sequence, List, Tuple
 
 import torch
 
@@ -392,6 +392,92 @@ def preprocess_multimodal(
     return sources
 
 
+def _qwen_image_token_for_serializer(data_args: DataArguments) -> str:
+    if data_args.mm_use_im_start_end:
+        return f"{DEFAULT_IM_START_TOKEN}{DEFAULT_IMAGE_TOKEN}{DEFAULT_IM_END_TOKEN}"
+    return DEFAULT_IMAGE_TOKEN
+
+
+def _normalize_qwen_multimodal_user_content(source: Sequence[Dict], data_args: DataArguments) -> Sequence[Dict]:
+    """Normalize Qwen multimodal user message to start with '<image>\\n'."""
+    image_seen = False
+    for sentence in source:
+        if sentence["from"] != "human":
+            continue
+        if DEFAULT_IMAGE_TOKEN not in sentence["value"]:
+            continue
+        stripped = sentence["value"].replace(DEFAULT_IMAGE_TOKEN, "").strip()
+        sentence["value"] = f"{DEFAULT_IMAGE_TOKEN}\n{stripped}".strip()
+        image_seen = True
+        break
+
+    if image_seen:
+        replace_token = _qwen_image_token_for_serializer(data_args)
+        for sentence in source:
+            sentence["value"] = sentence["value"].replace(DEFAULT_IMAGE_TOKEN, replace_token)
+    return source
+
+
+def preprocess_qwen_chat_template(
+    sources,
+    tokenizer: transformers.PreTrainedTokenizer,
+    data_args: DataArguments,
+    has_image: bool = False,
+) -> Dict:
+    input_ids_list, labels_list = [], []
+    image_anchor_counts, image_insert_counts = [], []
+    image_token_for_serializer = _qwen_image_token_for_serializer(data_args)
+
+    for source in sources:
+        messages = []
+        for sentence in source:
+            role = "user" if sentence["from"] == "human" else "assistant"
+            messages.append({"role": role, "content": sentence["value"]})
+
+        serialized_prompt = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        cur_input_ids, anchor_positions = tokenizer_image_token(
+            serialized_prompt,
+            tokenizer,
+            image_token=image_token_for_serializer,
+            return_image_token_positions=True,
+        )
+        cur_input_ids = torch.tensor(cur_input_ids, dtype=torch.long)
+        cur_labels = torch.full_like(cur_input_ids, IGNORE_INDEX)
+
+        for msg_idx, message in enumerate(messages):
+            if message["role"] != "assistant":
+                continue
+            prev_prompt = tokenizer.apply_chat_template(
+                messages[:msg_idx],
+                tokenize=False,
+                add_generation_prompt=False,
+            ) if msg_idx > 0 else ""
+            upto_prompt = tokenizer.apply_chat_template(
+                messages[:msg_idx + 1],
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            prev_ids = tokenizer_image_token(prev_prompt, tokenizer, image_token=image_token_for_serializer)
+            upto_ids = tokenizer_image_token(upto_prompt, tokenizer, image_token=image_token_for_serializer)
+            cur_labels[len(prev_ids):len(upto_ids)] = cur_input_ids[len(prev_ids):len(upto_ids)]
+
+        input_ids_list.append(cur_input_ids)
+        labels_list.append(cur_labels)
+        image_anchor_counts.append(len(anchor_positions))
+        image_insert_counts.append(int((cur_input_ids == IMAGE_TOKEN_INDEX).sum().item()))
+
+    return dict(
+        input_ids=input_ids_list,
+        labels=labels_list,
+        image_anchor_counts=image_anchor_counts,
+        image_insert_counts=image_insert_counts,
+    )
+
+
 def preprocess_llama_2(
     sources,
     tokenizer: transformers.PreTrainedTokenizer,
@@ -701,7 +787,8 @@ def preprocess_plain(
 def preprocess(
     sources: Sequence[str],
     tokenizer: transformers.PreTrainedTokenizer,
-    has_image: bool = False
+    has_image: bool = False,
+    data_args: Optional[DataArguments] = None,
 ) -> Dict:
     """
     Given a list of sources, each is a conversation list. This transform:
@@ -712,6 +799,13 @@ def preprocess(
     """
     if conversation_lib.default_conversation.sep_style == conversation_lib.SeparatorStyle.PLAIN:
         return preprocess_plain(sources, tokenizer)
+    if is_qwen_family_tokenizer(tokenizer) and data_args is not None:
+        return preprocess_qwen_chat_template(
+            sources,
+            tokenizer,
+            data_args=data_args,
+            has_image=has_image,
+        )
     if conversation_lib.default_conversation.sep_style == conversation_lib.SeparatorStyle.LLAMA_2:
         return preprocess_llama_2(sources, tokenizer, has_image=has_image)
     if conversation_lib.default_conversation.version.startswith("v1"):
@@ -759,6 +853,7 @@ class LazySupervisedDataset(Dataset):
         self.tokenizer = tokenizer
         self.list_data_dict = list_data_dict
         self.data_args = data_args
+        self._qwen_anchor_debug_count = 0
 
     def __len__(self):
         return len(self.list_data_dict)
@@ -820,15 +915,37 @@ class LazySupervisedDataset(Dataset):
             #     image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
             # else:
             #     image = processor.preprocess(image, return_tensors='pt')['pixel_values'][0]
-            sources = preprocess_multimodal(
-                copy.deepcopy([e["conversations"] for e in sources]),
-                self.data_args)
+            if is_qwen_family_tokenizer(self.tokenizer):
+                sources = copy.deepcopy([e["conversations"] for e in sources])
+                for source in sources:
+                    _normalize_qwen_multimodal_user_content(source, self.data_args)
+            else:
+                sources = preprocess_multimodal(
+                    copy.deepcopy([e["conversations"] for e in sources]),
+                    self.data_args,
+                )
         else:
             sources = copy.deepcopy([e["conversations"] for e in sources])
         data_dict = preprocess(
             sources,
             self.tokenizer,
-            has_image=('image' in self.list_data_dict[i]))
+            has_image=('image' in self.list_data_dict[i]),
+            data_args=self.data_args,
+        )
+        if (
+            'image' in self.list_data_dict[i]
+            and is_qwen_family_tokenizer(self.tokenizer)
+            and self._qwen_anchor_debug_count < 10
+            and "image_anchor_counts" in data_dict
+        ):
+            anchor_count = data_dict["image_anchor_counts"][0]
+            insert_count = data_dict["image_insert_counts"][0]
+            print(
+                f"[Qwen Anchor Check {self._qwen_anchor_debug_count + 1}/10] "
+                f"anchor_count={anchor_count}, feature_insert_count={insert_count}, "
+                f"match={anchor_count == insert_count}"
+            )
+            self._qwen_anchor_debug_count += 1
         if isinstance(i, int):
             data_dict = dict(input_ids=data_dict["input_ids"][0],
                              labels=data_dict["labels"][0])

@@ -83,6 +83,31 @@ def infer_backbone(model_args: ModelArguments) -> str:
     return "llama"
 
 
+def ensure_tokenizer_pad_token(tokenizer: transformers.PreTrainedTokenizer) -> None:
+    """Ensure pad token exists for preprocessing/collation.
+
+    Some Qwen/Llama-family tokenizers can have pad_token_id=None and may also
+    omit unk_token. In that case, fallback to eos_token as pad.
+    """
+    if tokenizer.pad_token_id is not None:
+        return
+
+    if getattr(tokenizer, "unk_token", None) is not None:
+        tokenizer.pad_token = tokenizer.unk_token
+    elif getattr(tokenizer, "eos_token", None) is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+    else:
+        raise ValueError(
+            "Tokenizer has no pad_token_id and no unk/eos token for fallback. "
+            "Please set tokenizer.pad_token before training."
+        )
+
+
+def get_tokenizer_pad_token_id(tokenizer: transformers.PreTrainedTokenizer) -> int:
+    ensure_tokenizer_pad_token(tokenizer)
+    return int(tokenizer.pad_token_id)
+
+
 @dataclass
 class DataArguments:
     data_path: str = field(default=None,
@@ -388,7 +413,7 @@ def preprocess_llama_2(
     # Mask targets
     sep = "[/INST] "
     for conversation, target in zip(conversations, targets):
-        total_len = int(target.ne(tokenizer.pad_token_id).sum())
+        total_len = int(target.ne(get_tokenizer_pad_token_id(tokenizer)).sum())
 
         rounds = conversation.split(conv.sep2)
         cur_len = 1
@@ -488,7 +513,7 @@ def preprocess_v1(
     # Mask targets
     sep = conv.sep + conv.roles[1] + ": "
     for conversation, target in zip(conversations, targets):
-        total_len = int(target.ne(tokenizer.pad_token_id).sum())
+        total_len = int(target.ne(get_tokenizer_pad_token_id(tokenizer)).sum())
 
         rounds = conversation.split(conv.sep2)
         cur_len = 1
@@ -573,7 +598,7 @@ def preprocess_mpt(
     # Mask targets
     sep = conv.sep + conv.roles[1]
     for conversation, target in zip(conversations, targets):
-        total_len = int(target.ne(tokenizer.pad_token_id).sum())
+        total_len = int(target.ne(get_tokenizer_pad_token_id(tokenizer)).sum())
 
         rounds = conversation.split(conv.sep)
         re_rounds = [conv.sep.join(rounds[:3])] # system + user + gpt
@@ -971,13 +996,15 @@ def train(attn_implementation=None):
                 model=model,
             )
     elif model_args.version == "v0.5":
-        tokenizer.pad_token = tokenizer.unk_token
+        ensure_tokenizer_pad_token(tokenizer)
     else:
-        tokenizer.pad_token = tokenizer.unk_token
+        ensure_tokenizer_pad_token(tokenizer)
         if model_args.version in conversation_lib.conv_templates:
             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
         else:
             conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
+
+    ensure_tokenizer_pad_token(tokenizer)
 
     if model_args.vision_tower is not None:
         model.get_model().initialize_vision_modules(

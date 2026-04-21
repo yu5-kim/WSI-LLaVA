@@ -20,7 +20,7 @@ from dataclasses import dataclass, field, fields
 import json
 import logging
 import pathlib
-from typing import Dict, Optional, Sequence, List
+from typing import Dict, Optional, Sequence, List, Tuple
 
 import torch
 
@@ -533,12 +533,11 @@ def preprocess_v1(
 
     # Mask targets
     sep = conv.sep + conv.roles[1] + ": "
-    qwen_tokenizer = is_qwen_family_tokenizer(tokenizer)
     for conversation, target in zip(conversations, targets):
         total_len = int(target.ne(get_tokenizer_pad_token_id(tokenizer)).sum())
 
         rounds = conversation.split(conv.sep2)
-        cur_len = 0 if qwen_tokenizer else 1
+        cur_len = 1
         target[:cur_len] = IGNORE_INDEX
         for i, rou in enumerate(rounds):
             if rou == "":
@@ -553,16 +552,11 @@ def preprocess_v1(
                 round_len = len(tokenizer_image_token(rou, tokenizer))
                 instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 2
             else:
-                if qwen_tokenizer:
-                    round_len = len(tokenizer(rou, add_special_tokens=False).input_ids)
-                    instruction_len = len(tokenizer(parts[0], add_special_tokens=False).input_ids)
-                else:
-                    round_len = len(tokenizer(rou).input_ids)
-                    instruction_len = len(tokenizer(parts[0]).input_ids) - 2
+                round_len = len(tokenizer(rou).input_ids)
+                instruction_len = len(tokenizer(parts[0]).input_ids) - 2
 
             if (
-                not qwen_tokenizer
-                and i != 0
+                i != 0
                 and not tokenizer.legacy
                 and IS_TOKENIZER_GREATER_THAN_0_14
             ):
@@ -582,6 +576,148 @@ def preprocess_v1(
                     f" (ignored)"
                 )
 
+    return dict(
+        input_ids=input_ids,
+        labels=targets,
+    )
+
+
+def _qwen_build_messages_from_source(source, conv) -> List[Dict[str, str]]:
+    role_map = {"human": "user", "gpt": "assistant"}
+    messages: List[Dict[str, str]] = []
+    system_prompt = getattr(conv, "system", None)
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+
+    for sentence in source:
+        src_role = sentence["from"]
+        if src_role not in role_map:
+            raise ValueError(f"Unsupported source role for Qwen chat preprocess: {src_role}")
+        messages.append({"role": role_map[src_role], "content": sentence["value"]})
+    return messages
+
+
+def _qwen_extract_assistant_mask(
+    tokenizer: transformers.PreTrainedTokenizer,
+    messages: List[Dict[str, str]],
+) -> Optional[Tuple[List[int], List[int]]]:
+    try:
+        tokenized = tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=False,
+            return_dict=True,
+            return_assistant_tokens_mask=True,
+        )
+    except TypeError:
+        return None
+
+    input_ids = tokenized.get("input_ids", None)
+    if input_ids is None:
+        return None
+
+    assistant_mask = (
+        tokenized.get("assistant_tokens_mask")
+        or tokenized.get("assistant_masks")
+        or tokenized.get("assistant_mask")
+    )
+    if assistant_mask is None:
+        return None
+
+    if isinstance(input_ids, torch.Tensor):
+        input_ids = input_ids.tolist()
+    if isinstance(assistant_mask, torch.Tensor):
+        assistant_mask = assistant_mask.tolist()
+
+    return input_ids, assistant_mask
+
+
+def preprocess_qwen_chat(
+    sources,
+    tokenizer: transformers.PreTrainedTokenizer,
+    has_image: bool = False,
+) -> Dict:
+    conv = conversation_lib.default_conversation.copy()
+
+    input_ids_list: List[torch.Tensor] = []
+    labels_list: List[torch.Tensor] = []
+
+    for source in sources:
+        messages = _qwen_build_messages_from_source(source, conv)
+        conversation = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+
+        if has_image:
+            full_ids = tokenizer_image_token(conversation, tokenizer)
+        else:
+            full_ids = tokenizer(
+                conversation,
+                add_special_tokens=False,
+            ).input_ids
+
+        labels = [IGNORE_INDEX] * len(full_ids)
+        assistant_mask_used = False
+
+        if not has_image:
+            mask_result = _qwen_extract_assistant_mask(tokenizer, messages)
+            if mask_result is not None:
+                mask_input_ids, assistant_mask = mask_result
+                if len(mask_input_ids) == len(full_ids) and len(assistant_mask) == len(full_ids):
+                    for i, is_assistant in enumerate(assistant_mask):
+                        if is_assistant:
+                            labels[i] = full_ids[i]
+                    assistant_mask_used = True
+
+        if not assistant_mask_used:
+            def tokenize_text(text: str) -> List[int]:
+                if has_image:
+                    return tokenizer_image_token(text, tokenizer)
+                return tokenizer(text, add_special_tokens=False).input_ids
+
+            for turn_idx, message in enumerate(messages):
+                if message["role"] != "assistant":
+                    continue
+
+                prev_text = tokenizer.apply_chat_template(
+                    messages[:turn_idx],
+                    tokenize=False,
+                    add_generation_prompt=False,
+                )
+                cur_text = tokenizer.apply_chat_template(
+                    messages[:turn_idx + 1],
+                    tokenize=False,
+                    add_generation_prompt=False,
+                )
+                start = len(tokenize_text(prev_text))
+                end = len(tokenize_text(cur_text))
+                if not (0 <= start < end <= len(full_ids)):
+                    raise ValueError(
+                        f"Qwen assistant span calculation failed: start={start}, end={end}, total={len(full_ids)}"
+                    )
+                for i in range(start, end):
+                    labels[i] = full_ids[i]
+
+        max_len = tokenizer.model_max_length
+        full_ids = full_ids[:max_len]
+        labels = labels[:max_len]
+
+        input_ids_list.append(torch.tensor(full_ids, dtype=torch.long))
+        labels_list.append(torch.tensor(labels, dtype=torch.long))
+
+    pad_token_id = get_tokenizer_pad_token_id(tokenizer)
+    input_ids = torch.nn.utils.rnn.pad_sequence(
+        input_ids_list,
+        batch_first=True,
+        padding_value=pad_token_id,
+    )
+    targets = torch.nn.utils.rnn.pad_sequence(
+        labels_list,
+        batch_first=True,
+        padding_value=IGNORE_INDEX,
+    )
     return dict(
         input_ids=input_ids,
         labels=targets,
@@ -715,6 +851,8 @@ def preprocess(
     if conversation_lib.default_conversation.sep_style == conversation_lib.SeparatorStyle.LLAMA_2:
         return preprocess_llama_2(sources, tokenizer, has_image=has_image)
     if conversation_lib.default_conversation.version.startswith("v1"):
+        if is_qwen_family_tokenizer(tokenizer):
+            return preprocess_qwen_chat(sources, tokenizer, has_image=has_image)
         return preprocess_v1(sources, tokenizer, has_image=has_image)
     if conversation_lib.default_conversation.version == "mpt":
         return preprocess_mpt(sources, tokenizer, has_image=has_image)

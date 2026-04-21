@@ -16,7 +16,7 @@
 import io
 import os
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 import json
 import logging
 import pathlib
@@ -39,6 +39,21 @@ from PIL import Image
 
 
 local_rank = None
+
+
+def _normalize_hf_training_args_cli() -> None:
+    """transformers>=4.46: TrainingArguments CLI uses --eval_strategy, not --evaluation_strategy."""
+    import sys
+
+    if "--evaluation_strategy" not in sys.argv:
+        return
+    try:
+        arg_names = {f.name for f in fields(transformers.TrainingArguments)}
+    except (TypeError, AttributeError):
+        return
+    if "eval_strategy" in arg_names and "evaluation_strategy" not in arg_names:
+        i = sys.argv.index("--evaluation_strategy")
+        sys.argv[i] = "--eval_strategy"
 
 
 def rank0_print(*args):
@@ -883,10 +898,22 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
 def train(attn_implementation=None):
     global local_rank
 
+    _normalize_hf_training_args_cli()
+
     parser = transformers.HfArgumentParser(
         (ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     backbone = infer_backbone(model_args)
+    if backbone == "qwen3":
+        from llava.model.language_model.llava_qwen3 import _QWEN3_IMPORT_OK
+
+        if not _QWEN3_IMPORT_OK:
+            raise ImportError(
+                "llm_backbone=qwen3 needs transformers with Qwen3* classes (e.g. Qwen3ForCausalLM). "
+                "This environment imported Qwen2 as a fallback, so Qwen3-4B weights will not load "
+                "(q_proj/k_proj shapes mismatch). Upgrade transformers, e.g. "
+                "pip install -U 'transformers>=4.51'."
+            )
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
 
@@ -1012,9 +1039,8 @@ def train(attn_implementation=None):
                 model=model,
             )
     elif model_args.version == "v0.5":
-        ensure_tokenizer_pad_token(tokenizer)
+        pass
     else:
-        ensure_tokenizer_pad_token(tokenizer)
         if model_args.version in conversation_lib.conv_templates:
             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
         else:

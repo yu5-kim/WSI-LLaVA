@@ -23,11 +23,16 @@ try:
     from transformers import Qwen3Config as _QwenConfig
     from transformers import Qwen3Model as _QwenModel
     from transformers import Qwen3ForCausalLM as _QwenForCausalLM
+
+    _QWEN3_IMPORT_OK = True
 except ImportError:
     # Backward compatibility: older transformers may only ship Qwen2 classes.
+    # Do not use this path for real Qwen3 checkpoints (state_dict shapes differ).
     from transformers import Qwen2Config as _QwenConfig
     from transformers import Qwen2Model as _QwenModel
     from transformers import Qwen2ForCausalLM as _QwenForCausalLM
+
+    _QWEN3_IMPORT_OK = False
 
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.generation.utils import GenerateOutput

@@ -18,7 +18,7 @@ PYTHONPATH=./WSI_LLaVA WANDB_MODE=offline deepspeed --include localhost:4 --mast
     --per_device_train_batch_size 32 \
     --per_device_eval_batch_size 1 \
     --gradient_accumulation_steps 4 \
-    --evaluation_strategy "no" \
+    --eval_strategy "no" \
     --save_strategy "steps" \
     --save_steps 50000 \
     --save_total_limit 1 \

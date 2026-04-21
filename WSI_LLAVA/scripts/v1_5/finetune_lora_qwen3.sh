@@ -1,81 +1,71 @@
 #!/usr/bin/env bash
+# Stage3만 (LoRA). Stage2 mm_projector.bin 미로드. LLM: Qwen3 (WSI-LLaVA Qwen 분기).
+# 데이터·설정: finetune_lora_stage3_only_last.sh 와 동일 (LLaVA576 last-layer JSON + 동일 feature 폴더).
+# 레포 루트: bash WSI_LLAVA/scripts/v1_5/finetune_lora_qwen3.sh
+#
+# 메모리: 576 비전 토큰 + 텍스트로 Vicuna 스크립트와 동일 micro-batch(32)는 보통 OOM.
+# 아래는 micro-batch 8 / accum 16 → GPU당 Vicuna 대비 동일한 "노드당" 스텝 합(32×4 ≈ 8×16).
+# 더 필요하면 PER_DEVICE_TRAIN_BATCH_SIZE=4 GRADIENT_ACCUMULATION_STEPS=32 로 실행.
+#
+# GPU 지정: 미설정 시 보이는 GPU 전부 사용. 예)
+#   CUDA_VISIBLE_DEVICES=0 bash WSI_LLAVA/scripts/v1_5/finetune_lora_qwen3.sh
+#   CUDA_VISIBLE_DEVICES=4 MASTER_PORT=29514 bash ...   # 다른 job과 포트 분리
+
 set -euo pipefail
 
-# Qwen3 기반 WSI-LLaVA LoRA 학습 예시.
-#
-# 중요:
-#   이 스크립트는 "Qwen3 모델만"으로는 실행되지 않습니다.
-#   아래 항목이 모두 필요합니다.
-#   1) Qwen3 텍스트 백본 체크포인트
-#   2) vision_tower(예: CLIP) 경로
-#   3) WSI feature(.pt) 폴더
-#   4) 학습 JSON 데이터
-#   5) deepspeed 실행 환경
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+export PYTHONPATH="${REPO_ROOT}/WSI_LLAVA"
+export WANDB_MODE=offline
+REPORT_TO="${REPORT_TO:-wandb}"
 
-MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-Qwen/Qwen3-4B}"
-VISION_TOWER="${VISION_TOWER:-./LLaVA-main/clip-vit-large-patch14-336}"
-DATA_PATH="${DATA_PATH:-/path/to/WSI-Bench-train.json}"
-IMAGE_FOLDER="${IMAGE_FOLDER:-/path/to/wsi_features_pt}"
-OUTPUT_DIR="${OUTPUT_DIR:-/path/to/output/wsi-llava-qwen3-lora}"
-DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-./WSI_LLAVA/scripts/zero3.json}"
-PYTHONPATH_ROOT="${PYTHONPATH_ROOT:-./WSI_LLAVA}"
+IMAGE_FOLDER="/dataset/data/slide_spatial_features/ps512/conch_v1_5_titan/TCGA_yu5kim_WSI_LLaVA"
+DATA_PATH="/dataset/personal/yu5kim/WSI-LLaVA/WSI-Bench/WSI-Bench-train_filtered_llava576_paths_last.json"
+OUTPUT_DIR="${REPO_ROOT}/checkpoints_1gpu_3e/wsi_llava_qwen3_lora_last_stage3only"
 
-missing=0
-for required_cmd in deepspeed; do
-  if ! command -v "$required_cmd" >/dev/null 2>&1; then
-    echo "[ERROR] required command not found: $required_cmd"
-    missing=1
-  fi
-done
+NUM_TRAIN_EPOCHS=3
+SAVE_TOTAL_LIMIT=1
+PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-8}"
+GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-16}"
 
-for required_path in "$VISION_TOWER" "$DATA_PATH" "$IMAGE_FOLDER" "$(dirname "$OUTPUT_DIR")" "$DEEPSPEED_CONFIG"; do
-  if [ ! -e "$required_path" ]; then
-    echo "[ERROR] required path not found: $required_path"
-    missing=1
-  fi
-done
+MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-/dataset/model/Qwen3/Qwen3-4B}"
+VISION_TOWER="${VISION_TOWER:-/dataset/data/raw/WSIBench/clip-vit-large-patch14-336}"
 
-if [ "$missing" -ne 0 ]; then
-  echo ""
-  echo "Please set these env vars to valid paths before running:"
-  echo "  MODEL_NAME_OR_PATH, VISION_TOWER, DATA_PATH, IMAGE_FOLDER, OUTPUT_DIR, DEEPSPEED_CONFIG"
-  exit 1
-fi
+cd "${REPO_ROOT}" || exit 1
 
-PYTHONPATH="$PYTHONPATH_ROOT" WANDB_MODE=offline deepspeed --include localhost:0 --master_port 29507 \
-  ./WSI_LLAVA/llava/train/train_mem.py \
-  --lora_enable True --lora_r 128 --lora_alpha 256 --mm_projector_lr 2e-5 \
-  --deepspeed "$DEEPSPEED_CONFIG" \
-  --llm_backbone qwen3 \
-  --model_name_or_path "$MODEL_NAME_OR_PATH" \
-  --version v1 \
-  --data_path "$DATA_PATH" \
-  --image_folder "$IMAGE_FOLDER" \
-  --vision_tower "$VISION_TOWER" \
-  --mm_projector_type mlp2x_gelu \
-  --mm_vision_select_layer -2 \
-  --mm_use_im_start_end False \
-  --mm_use_im_patch_token False \
-  --image_aspect_ratio pad \
-  --group_by_modality_length True \
-  --bf16 True \
-  --output_dir "$OUTPUT_DIR" \
-  --num_train_epochs 3 \
-  --per_device_train_batch_size 8 \
-  --per_device_eval_batch_size 1 \
-  --gradient_accumulation_steps 16 \
-  --evaluation_strategy "no" \
-  --save_strategy "steps" \
-  --save_steps 2000 \
-  --save_total_limit 2 \
-  --learning_rate 2e-4 \
-  --weight_decay 0. \
-  --warmup_ratio 0.03 \
-  --lr_scheduler_type "cosine" \
-  --logging_steps 10 \
-  --tf32 True \
-  --model_max_length 2048 \
-  --gradient_checkpointing True \
-  --dataloader_num_workers 4 \
-  --lazy_preprocess True \
-  --report_to wandb
+deepspeed --master_port "${MASTER_PORT:-29507}" "${REPO_ROOT}/WSI_LLAVA/llava/train/train_mem.py" \
+    --lora_enable True --lora_r 128 --lora_alpha 256 --mm_projector_lr 2e-5 \
+    --deepspeed "${REPO_ROOT}/WSI_LLAVA/scripts/zero3.json" \
+    --llm_backbone qwen3 \
+    --model_name_or_path "${MODEL_NAME_OR_PATH}" \
+    --version v1 \
+    --data_path "${DATA_PATH}" \
+    --image_folder "${IMAGE_FOLDER}" \
+    --vision_tower "${VISION_TOWER}" \
+    --mm_projector_type mlp2x_gelu \
+    --mm_vision_select_layer -2 \
+    --mm_use_im_start_end False \
+    --mm_use_im_patch_token False \
+    --image_aspect_ratio pad \
+    --group_by_modality_length True \
+    --bf16 True \
+    --output_dir "${OUTPUT_DIR}" \
+    --num_train_epochs "${NUM_TRAIN_EPOCHS}" \
+    --per_device_train_batch_size "${PER_DEVICE_TRAIN_BATCH_SIZE}" \
+    --per_device_eval_batch_size 1 \
+    --gradient_accumulation_steps "${GRADIENT_ACCUMULATION_STEPS}" \
+    --eval_strategy "no" \
+    --save_strategy "steps" \
+    --save_steps 50000 \
+    --save_total_limit "${SAVE_TOTAL_LIMIT}" \
+    --learning_rate 2e-4 \
+    --weight_decay 0. \
+    --warmup_ratio 0.03 \
+    --lr_scheduler_type "cosine" \
+    --logging_steps 1 \
+    --tf32 True \
+    --model_max_length 2048 \
+    --gradient_checkpointing True \
+    --dataloader_num_workers 4 \
+    --lazy_preprocess True \
+    --report_to "${REPORT_TO}"

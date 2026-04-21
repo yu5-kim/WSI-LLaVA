@@ -111,6 +111,13 @@ We apologize for the oversight and appreciate your understanding.
 
 
 
+
+## 🧭 Qwen3 Migration Design
+
+If you plan to replace the LLaVA language backbone with Qwen3, see the migration design document: [docs/qwen3_migration_plan.md](docs/qwen3_migration_plan.md).
+
+---
+
 ## 🏗️ Architecture
 
 WSI-LLaVA consists of three core components:

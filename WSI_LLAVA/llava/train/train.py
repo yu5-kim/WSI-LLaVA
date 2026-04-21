@@ -16,7 +16,7 @@
 import io
 import os
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 import json
 import logging
 import pathlib
@@ -41,6 +41,21 @@ from PIL import Image
 local_rank = None
 
 
+def _normalize_hf_training_args_cli() -> None:
+    """transformers>=4.46: TrainingArguments CLI uses --eval_strategy, not --evaluation_strategy."""
+    import sys
+
+    if "--evaluation_strategy" not in sys.argv:
+        return
+    try:
+        arg_names = {f.name for f in fields(transformers.TrainingArguments)}
+    except (TypeError, AttributeError):
+        return
+    if "eval_strategy" in arg_names and "evaluation_strategy" not in arg_names:
+        i = sys.argv.index("--evaluation_strategy")
+        sys.argv[i] = "--eval_strategy"
+
+
 def rank0_print(*args):
     if local_rank == 0:
         print(*args)
@@ -53,6 +68,7 @@ IS_TOKENIZER_GREATER_THAN_0_14 = version.parse(tokenizers.__version__) >= versio
 @dataclass
 class ModelArguments:
     model_name_or_path: Optional[str] = field(default="facebook/opt-125m")
+    llm_backbone: Optional[str] = field(default="auto")
     version: Optional[str] = field(default="v0")
     freeze_backbone: bool = field(default=False)
     tune_mm_mlp_adapter: bool = field(default=False)
@@ -64,6 +80,53 @@ class ModelArguments:
     mm_use_im_patch_token: bool = field(default=True)
     mm_patch_merge_type: Optional[str] = field(default='flat')
     mm_vision_select_feature: Optional[str] = field(default="patch")
+
+
+def infer_backbone(model_args: ModelArguments) -> str:
+    if model_args.llm_backbone and model_args.llm_backbone != "auto":
+        return model_args.llm_backbone.lower()
+
+    lowered = (model_args.model_name_or_path or "").lower()
+    if "mpt" in lowered:
+        return "mpt"
+    if "mistral" in lowered:
+        return "mistral"
+    if "qwen3" in lowered:
+        return "qwen3"
+    if "qwen2" in lowered or "qwen" in lowered:
+        return "qwen2"
+    return "llama"
+
+
+def ensure_tokenizer_pad_token(tokenizer: transformers.PreTrainedTokenizer) -> None:
+    """Ensure pad token exists for preprocessing/collation.
+
+    Some Qwen/Llama-family tokenizers can have pad_token_id=None and may also
+    omit unk_token. In that case, fallback to eos_token as pad.
+    """
+    if tokenizer.pad_token_id is not None:
+        return
+
+    if getattr(tokenizer, "unk_token", None) is not None:
+        tokenizer.pad_token = tokenizer.unk_token
+    elif getattr(tokenizer, "eos_token", None) is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+    else:
+        raise ValueError(
+            "Tokenizer has no pad_token_id and no unk/eos token for fallback. "
+            "Please set tokenizer.pad_token before training."
+        )
+
+
+def get_tokenizer_pad_token_id(tokenizer: transformers.PreTrainedTokenizer) -> int:
+    ensure_tokenizer_pad_token(tokenizer)
+    return int(tokenizer.pad_token_id)
+
+
+def is_qwen_family_tokenizer(tokenizer: transformers.PreTrainedTokenizer) -> bool:
+    class_name = tokenizer.__class__.__name__.lower()
+    name_or_path = str(getattr(tokenizer, "name_or_path", "")).lower()
+    return "qwen" in class_name or "qwen" in name_or_path
 
 
 @dataclass
@@ -371,7 +434,7 @@ def preprocess_llama_2(
     # Mask targets
     sep = "[/INST] "
     for conversation, target in zip(conversations, targets):
-        total_len = int(target.ne(tokenizer.pad_token_id).sum())
+        total_len = int(target.ne(get_tokenizer_pad_token_id(tokenizer)).sum())
 
         rounds = conversation.split(conv.sep2)
         cur_len = 1
@@ -470,11 +533,12 @@ def preprocess_v1(
 
     # Mask targets
     sep = conv.sep + conv.roles[1] + ": "
+    qwen_tokenizer = is_qwen_family_tokenizer(tokenizer)
     for conversation, target in zip(conversations, targets):
-        total_len = int(target.ne(tokenizer.pad_token_id).sum())
+        total_len = int(target.ne(get_tokenizer_pad_token_id(tokenizer)).sum())
 
         rounds = conversation.split(conv.sep2)
-        cur_len = 1
+        cur_len = 0 if qwen_tokenizer else 1
         target[:cur_len] = IGNORE_INDEX
         for i, rou in enumerate(rounds):
             if rou == "":
@@ -489,10 +553,19 @@ def preprocess_v1(
                 round_len = len(tokenizer_image_token(rou, tokenizer))
                 instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 2
             else:
-                round_len = len(tokenizer(rou).input_ids)
-                instruction_len = len(tokenizer(parts[0]).input_ids) - 2
+                if qwen_tokenizer:
+                    round_len = len(tokenizer(rou, add_special_tokens=False).input_ids)
+                    instruction_len = len(tokenizer(parts[0], add_special_tokens=False).input_ids)
+                else:
+                    round_len = len(tokenizer(rou).input_ids)
+                    instruction_len = len(tokenizer(parts[0]).input_ids) - 2
 
-            if i != 0 and not tokenizer.legacy and IS_TOKENIZER_GREATER_THAN_0_14:
+            if (
+                not qwen_tokenizer
+                and i != 0
+                and not tokenizer.legacy
+                and IS_TOKENIZER_GREATER_THAN_0_14
+            ):
                 round_len -= 1
                 instruction_len -= 1
 
@@ -556,7 +629,7 @@ def preprocess_mpt(
     # Mask targets
     sep = conv.sep + conv.roles[1]
     for conversation, target in zip(conversations, targets):
-        total_len = int(target.ne(tokenizer.pad_token_id).sum())
+        total_len = int(target.ne(get_tokenizer_pad_token_id(tokenizer)).sum())
 
         rounds = conversation.split(conv.sep)
         re_rounds = [conv.sep.join(rounds[:3])] # system + user + gpt
@@ -825,9 +898,22 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
 def train(attn_implementation=None):
     global local_rank
 
+    _normalize_hf_training_args_cli()
+
     parser = transformers.HfArgumentParser(
         (ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    backbone = infer_backbone(model_args)
+    if backbone == "qwen3":
+        from llava.model.language_model.llava_qwen3 import _QWEN3_IMPORT_OK
+
+        if not _QWEN3_IMPORT_OK:
+            raise ImportError(
+                "llm_backbone=qwen3 needs transformers with Qwen3* classes (e.g. Qwen3ForCausalLM). "
+                "This environment imported Qwen2 as a fallback, so Qwen3-4B weights will not load "
+                "(q_proj/k_proj shapes mismatch). Upgrade transformers, e.g. "
+                "pip install -U 'transformers>=4.51'."
+            )
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
 
@@ -851,13 +937,29 @@ def train(attn_implementation=None):
         ))
 
     if model_args.vision_tower is not None:
-        if 'mpt' in model_args.model_name_or_path:
+        if backbone == 'mpt':
             config = transformers.AutoConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True)
             config.attn_config['attn_impl'] = training_args.mpt_attn_impl
             model = LlavaMptForCausalLM.from_pretrained(
                 model_args.model_name_or_path,
                 config=config,
                 cache_dir=training_args.cache_dir,
+                **bnb_model_from_pretrained_args
+            )
+        elif backbone in ['qwen3', 'qwen2', 'qwen']:
+            model = WSIQwen3ForCausalLM.from_pretrained(
+                model_args.model_name_or_path,
+                cache_dir=training_args.cache_dir,
+                attn_implementation=attn_implementation,
+                torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
+                **bnb_model_from_pretrained_args
+            )
+        elif backbone == 'mistral':
+            model = LlavaMistralForCausalLM.from_pretrained(
+                model_args.model_name_or_path,
+                cache_dir=training_args.cache_dir,
+                attn_implementation=attn_implementation,
+                torch_dtype=(torch.bfloat16 if training_args.bf16 else None),
                 **bnb_model_from_pretrained_args
             )
         else:
@@ -869,7 +971,7 @@ def train(attn_implementation=None):
                 **bnb_model_from_pretrained_args
             )
     else:
-        model = transformers.LlamaForCausalLM.from_pretrained(
+        model = transformers.AutoModelForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
             attn_implementation=attn_implementation,
@@ -912,12 +1014,13 @@ def train(attn_implementation=None):
         rank0_print("Adding LoRA adapters...")
         model = get_peft_model(model, lora_config)
 
-    if 'mpt' in model_args.model_name_or_path:
+    if backbone in ['mpt', 'qwen3', 'qwen2', 'qwen']:
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
             model_max_length=training_args.model_max_length,
-            padding_side="right"
+            padding_side="right",
+            use_fast=True,
         )
     else:
         tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -936,13 +1039,14 @@ def train(attn_implementation=None):
                 model=model,
             )
     elif model_args.version == "v0.5":
-        tokenizer.pad_token = tokenizer.unk_token
+        pass
     else:
-        tokenizer.pad_token = tokenizer.unk_token
         if model_args.version in conversation_lib.conv_templates:
             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
         else:
             conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
+
+    ensure_tokenizer_pad_token(tokenizer)
 
     if model_args.vision_tower is not None:
         model.get_model().initialize_vision_modules(

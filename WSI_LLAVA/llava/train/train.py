@@ -39,6 +39,12 @@ from PIL import Image
 
 
 local_rank = None
+TOKENIZATION_MISMATCH_STATE = {
+    "total": 0,
+    "mismatch": 0,
+    "max_ratio": 1.0,
+}
+QWEN_IMAGE_DEBUG_PRINTED = False
 
 
 def _normalize_hf_training_args_cli() -> None:
@@ -137,6 +143,7 @@ class DataArguments:
     is_multimodal: bool = False
     image_folder: Optional[str] = field(default=None)
     image_aspect_ratio: str = 'square'
+    llm_backbone: str = field(default="llama")
 
 
 @dataclass
@@ -173,6 +180,10 @@ class TrainingArguments(transformers.TrainingArguments):
     lora_bias: str = "none"
     mm_projector_lr: Optional[float] = None
     group_by_modality_length: bool = field(default=False)
+    max_tokenization_mismatch_ratio: float = field(
+        default=1.0,
+        metadata={"help": "Abort training when tokenization mismatch ratio exceeds this threshold."}
+    )
 
 
 def maybe_zero_3(param, ignore_status=False, name=None):
@@ -588,6 +599,176 @@ def preprocess_v1(
     )
 
 
+def _normalize_qwen_messages(source: Sequence[Dict[str, str]]) -> List[Dict[str, str]]:
+    role_map = {"human": "user", "gpt": "assistant", "assistant": "assistant", "user": "user", "system": "system"}
+    messages: List[Dict[str, str]] = []
+    for sentence in source:
+        role = role_map.get(sentence["from"].lower(), sentence["from"].lower())
+        if role not in {"system", "user", "assistant"}:
+            continue
+        messages.append({"role": role, "content": sentence["value"]})
+    if messages and messages[0]["role"] == "assistant":
+        messages = messages[1:]
+    return messages
+
+
+def _tokenize_text_with_image_alignment(text: str, tokenizer, has_image: bool, add_special_tokens: bool = False) -> List[int]:
+    if has_image:
+        return tokenizer_image_token(text, tokenizer)
+    return tokenizer(text, add_special_tokens=add_special_tokens).input_ids
+
+
+def _assistant_mask_from_turn_spans(messages, tokenizer, has_image: bool) -> Dict[str, List[int]]:
+    prefix_messages: List[Dict[str, str]] = []
+    spans = []
+    for idx, msg in enumerate(messages):
+        prefix_messages.append(msg)
+        full_text = tokenizer.apply_chat_template(
+            prefix_messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        prev_text = tokenizer.apply_chat_template(
+            prefix_messages[:-1],
+            tokenize=False,
+            add_generation_prompt=False,
+        ) if idx > 0 else ""
+        full_ids = _tokenize_text_with_image_alignment(full_text, tokenizer, has_image, add_special_tokens=False)
+        prev_ids = _tokenize_text_with_image_alignment(prev_text, tokenizer, has_image, add_special_tokens=False) if idx > 0 else []
+        if len(full_ids) < len(prev_ids):
+            raise ValueError(f"Incremental tokenization shrank: full={len(full_ids)} prev={len(prev_ids)}")
+        spans.append({
+            "role": msg["role"],
+            "start": len(prev_ids),
+            "end": len(full_ids),
+            "delta": len(full_ids) - len(prev_ids),
+        })
+    final_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+    final_ids = _tokenize_text_with_image_alignment(final_text, tokenizer, has_image, add_special_tokens=False)
+    assistant_mask = [0] * len(final_ids)
+    for span in spans:
+        if span["role"] != "assistant":
+            continue
+        for pos in range(span["start"], span["end"]):
+            assistant_mask[pos] = 1
+    return {"assistant_mask": assistant_mask, "spans": spans, "final_ids": final_ids, "final_text": final_text}
+
+
+def _record_mismatch_and_maybe_raise(sample_id, debug_info: Dict) -> None:
+    TOKENIZATION_MISMATCH_STATE["mismatch"] += 1
+    ratio = TOKENIZATION_MISMATCH_STATE["mismatch"] / max(TOKENIZATION_MISMATCH_STATE["total"], 1)
+    max_ratio = TOKENIZATION_MISMATCH_STATE["max_ratio"]
+    print(
+        f"WARNING: tokenization mismatch in sample_id={sample_id}, "
+        f"ratio={ratio:.6f} ({TOKENIZATION_MISMATCH_STATE['mismatch']}/{TOKENIZATION_MISMATCH_STATE['total']}). "
+        f"debug={json.dumps(debug_info, ensure_ascii=False)}"
+    )
+    if ratio > max_ratio:
+        raise RuntimeError(
+            f"Tokenization mismatch ratio {ratio:.6f} exceeded max_tokenization_mismatch_ratio={max_ratio:.6f}. "
+            f"Last sample_id={sample_id}"
+        )
+
+
+def preprocess_qwen_chat(
+    sources,
+    tokenizer: transformers.PreTrainedTokenizer,
+    has_image: bool = False,
+    sample_ids: Optional[Sequence[str]] = None,
+) -> Dict:
+    global QWEN_IMAGE_DEBUG_PRINTED
+    input_ids_list = []
+    labels_list = []
+    for idx, source in enumerate(sources):
+        TOKENIZATION_MISMATCH_STATE["total"] += 1
+        sample_id = sample_ids[idx] if sample_ids is not None and idx < len(sample_ids) else f"sample_{idx}"
+        messages = _normalize_qwen_messages(source)
+        if not messages:
+            empty = torch.tensor([tokenizer.bos_token_id], dtype=torch.long)
+            input_ids_list.append(empty)
+            labels_list.append(torch.full_like(empty, IGNORE_INDEX))
+            continue
+
+        assistant_mask = None
+        tokenized = None
+        try:
+            tokenized = tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=False,
+                return_dict=True,
+                return_assistant_tokens_mask=True,
+            )
+            assistant_mask = tokenized.get("assistant_masks", tokenized.get("assistant_tokens_mask", None))
+        except TypeError:
+            tokenized = None
+
+        if tokenized is None:
+            ids = tokenizer.apply_chat_template(messages, tokenize=True, add_generation_prompt=False)
+        else:
+            ids = tokenized["input_ids"]
+        if isinstance(ids, torch.Tensor):
+            ids = ids.tolist()
+
+        if has_image:
+            text_for_image = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+            ids_with_image = tokenizer_image_token(text_for_image, tokenizer)
+            debug_ids_plain = tokenizer(text_for_image, add_special_tokens=False).input_ids
+            if len(ids_with_image) - text_for_image.count(DEFAULT_IMAGE_TOKEN) != len(debug_ids_plain):
+                _record_mismatch_and_maybe_raise(
+                    sample_id,
+                    {
+                        "reason": "image_placeholder_alignment_failed",
+                        "image_placeholders": text_for_image.count(DEFAULT_IMAGE_TOKEN),
+                        "text_token_len": len(debug_ids_plain),
+                        "image_token_len": len(ids_with_image),
+                    },
+                )
+            ids = ids_with_image
+
+        span_debug = None
+        if assistant_mask is None:
+            span_data = _assistant_mask_from_turn_spans(messages, tokenizer, has_image=has_image)
+            assistant_mask = span_data["assistant_mask"]
+            span_debug = span_data["spans"]
+        if isinstance(assistant_mask, torch.Tensor):
+            assistant_mask = assistant_mask.tolist()
+
+        if len(assistant_mask) != len(ids):
+            span_data = _assistant_mask_from_turn_spans(messages, tokenizer, has_image=has_image)
+            recomputed_mask = span_data["assistant_mask"]
+            if len(recomputed_mask) == len(ids):
+                assistant_mask = recomputed_mask
+                span_debug = span_data["spans"]
+            else:
+                _record_mismatch_and_maybe_raise(
+                    sample_id,
+                    {
+                        "reason": "assistant_mask_length_mismatch",
+                        "total_len": len(ids),
+                        "cur_len": len(assistant_mask),
+                        "turn_spans": span_data["spans"],
+                    },
+                )
+                assistant_mask = [0] * len(ids)
+
+        labels = [tok if m == 1 else IGNORE_INDEX for tok, m in zip(ids, assistant_mask)]
+        input_ids_list.append(torch.tensor(ids, dtype=torch.long))
+        labels_list.append(torch.tensor(labels, dtype=torch.long))
+
+        if has_image:
+            assert len(input_ids_list[-1]) == len(labels_list[-1]), f"Image sample length mismatch: {sample_id}"
+            if not QWEN_IMAGE_DEBUG_PRINTED:
+                QWEN_IMAGE_DEBUG_PRINTED = True
+                print(
+                    f"[QWEN-DEBUG] sample_id={sample_id} total_len={len(ids)} cur_len={sum(assistant_mask)} "
+                    f"turn_spans={json.dumps(span_debug or [], ensure_ascii=False)} "
+                    f"image_token_count={int((input_ids_list[-1] == IMAGE_TOKEN_INDEX).sum().item())}"
+                )
+
+    return dict(input_ids=input_ids_list, labels=labels_list)
+
+
 def preprocess_mpt(
     sources,
     tokenizer: transformers.PreTrainedTokenizer,
@@ -701,7 +882,9 @@ def preprocess_plain(
 def preprocess(
     sources: Sequence[str],
     tokenizer: transformers.PreTrainedTokenizer,
-    has_image: bool = False
+    has_image: bool = False,
+    llm_backbone: Optional[str] = None,
+    sample_ids: Optional[Sequence[str]] = None,
 ) -> Dict:
     """
     Given a list of sources, each is a conversation list. This transform:
@@ -712,6 +895,8 @@ def preprocess(
     """
     if conversation_lib.default_conversation.sep_style == conversation_lib.SeparatorStyle.PLAIN:
         return preprocess_plain(sources, tokenizer)
+    if (llm_backbone or "").lower() in {"qwen3", "qwen2", "qwen"}:
+        return preprocess_qwen_chat(sources, tokenizer, has_image=has_image, sample_ids=sample_ids)
     if conversation_lib.default_conversation.sep_style == conversation_lib.SeparatorStyle.LLAMA_2:
         return preprocess_llama_2(sources, tokenizer, has_image=has_image)
     if conversation_lib.default_conversation.version.startswith("v1"):
@@ -828,7 +1013,10 @@ class LazySupervisedDataset(Dataset):
         data_dict = preprocess(
             sources,
             self.tokenizer,
-            has_image=('image' in self.list_data_dict[i]))
+            has_image=('image' in self.list_data_dict[i]),
+            llm_backbone=self.data_args.llm_backbone,
+            sample_ids=[str(self.list_data_dict[i].get("id", i))],
+        )
         if isinstance(i, int):
             data_dict = dict(input_ids=data_dict["input_ids"][0],
                              labels=data_dict["labels"][0])
@@ -896,7 +1084,7 @@ def make_supervised_data_module(tokenizer: transformers.PreTrainedTokenizer,
 
 
 def train(attn_implementation=None):
-    global local_rank
+    global local_rank, QWEN_IMAGE_DEBUG_PRINTED
 
     _normalize_hf_training_args_cli()
 
@@ -904,6 +1092,11 @@ def train(attn_implementation=None):
         (ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     backbone = infer_backbone(model_args)
+    data_args.llm_backbone = backbone
+    TOKENIZATION_MISMATCH_STATE["total"] = 0
+    TOKENIZATION_MISMATCH_STATE["mismatch"] = 0
+    TOKENIZATION_MISMATCH_STATE["max_ratio"] = float(training_args.max_tokenization_mismatch_ratio)
+    QWEN_IMAGE_DEBUG_PRINTED = False
     if backbone == "qwen3":
         from llava.model.language_model.llava_qwen3 import _QWEN3_IMPORT_OK
 

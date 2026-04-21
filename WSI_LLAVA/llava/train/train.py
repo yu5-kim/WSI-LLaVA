@@ -479,6 +479,9 @@ def preprocess_v1(
     tokenizer: transformers.PreTrainedTokenizer,
     has_image: bool = False
 ) -> Dict:
+    if is_qwen_family_tokenizer(tokenizer):
+        return preprocess_qwen_v1(sources, tokenizer, has_image=has_image)
+
     conv = conversation_lib.default_conversation.copy()
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
 
@@ -581,6 +584,95 @@ def preprocess_v1(
                     f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}."
                     f" (ignored)"
                 )
+
+    return dict(
+        input_ids=input_ids,
+        labels=targets,
+    )
+
+
+def llava_sample_to_qwen_messages(sample: Dict, system_prompt: str) -> List[Dict[str, str]]:
+    role_map = {"human": "user", "gpt": "assistant"}
+    messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
+
+    conversations = sample.get("conversations", [])
+    is_image_sample = sample.get("image", False)
+    for sentence in conversations:
+        role = role_map.get(sentence.get("from"))
+        if role is None:
+            continue
+        content = sentence.get("value", "")
+        if is_image_sample and role == "user" and DEFAULT_IMAGE_TOKEN not in content:
+            content = f"{DEFAULT_IMAGE_TOKEN}\n{content}"
+        messages.append({"role": role, "content": content})
+    return messages
+
+
+def preprocess_qwen_v1(
+    sources,
+    tokenizer: transformers.PreTrainedTokenizer,
+    has_image: bool = False
+) -> Dict:
+    if not hasattr(tokenizer, "apply_chat_template"):
+        raise ValueError("Qwen preprocessing requires tokenizer.apply_chat_template")
+
+    system_prompt = conversation_lib.default_conversation.system
+    all_messages = [
+        llava_sample_to_qwen_messages(
+            {"image": has_image, "conversations": source},
+            system_prompt=system_prompt,
+        )
+        for source in sources
+    ]
+    conversations = [
+        tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+        for messages in all_messages
+    ]
+
+    if has_image:
+        input_ids = torch.stack(
+            [tokenizer_image_token(prompt, tokenizer, return_tensors='pt') for prompt in conversations],
+            dim=0,
+        )
+    else:
+        input_ids = tokenizer(
+            conversations,
+            return_tensors="pt",
+            padding="longest",
+            max_length=tokenizer.model_max_length,
+            truncation=True,
+        ).input_ids
+
+    targets = torch.full_like(input_ids, IGNORE_INDEX)
+
+    def _get_tokenized_len(text: str) -> int:
+        if has_image:
+            return len(tokenizer_image_token(text, tokenizer))
+        return len(tokenizer(text, add_special_tokens=False).input_ids)
+
+    for row_idx, (messages, target) in enumerate(zip(all_messages, targets)):
+        running_messages = []
+        for message in messages:
+            running_messages.append(message)
+            if message["role"] != "assistant":
+                continue
+            assistant_prompt = tokenizer.apply_chat_template(
+                running_messages,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            prefix_prompt = tokenizer.apply_chat_template(
+                running_messages[:-1],
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            start = _get_tokenized_len(prefix_prompt)
+            end = _get_tokenized_len(assistant_prompt)
+            max_len = input_ids[row_idx].size(0)
+            start = min(start, max_len)
+            end = min(end, max_len)
+            if start < end:
+                target[start:end] = input_ids[row_idx][start:end]
 
     return dict(
         input_ids=input_ids,

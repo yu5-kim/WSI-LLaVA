@@ -182,8 +182,15 @@ def process_images(images, image_processor, model_cfg):
     return new_images
 
 
-def tokenizer_image_token(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX, return_tensors=None):
-    prompt_chunks = [tokenizer(chunk).input_ids for chunk in prompt.split('<image>')]
+def tokenizer_image_token(
+    prompt,
+    tokenizer,
+    image_token_index=IMAGE_TOKEN_INDEX,
+    return_tensors=None,
+    image_token: str = "<image>",
+    return_image_token_positions: bool = False,
+):
+    prompt_chunks = [tokenizer(chunk).input_ids for chunk in prompt.split(image_token)]
 
     def insert_separator(X, sep):
         return [ele for sublist in zip(X, [sep]*len(X)) for ele in sublist][:-1]
@@ -194,13 +201,21 @@ def tokenizer_image_token(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX
         offset = 1
         input_ids.append(prompt_chunks[0][0])
 
+    image_token_positions = []
     for x in insert_separator(prompt_chunks, [image_token_index] * (offset + 1)):
+        if x == [image_token_index] * (offset + 1):
+            image_token_positions.append(len(input_ids))
         input_ids.extend(x[offset:])
 
     if return_tensors is not None:
         if return_tensors == 'pt':
-            return torch.tensor(input_ids, dtype=torch.long)
+            output_ids = torch.tensor(input_ids, dtype=torch.long)
+            if return_image_token_positions:
+                return output_ids, image_token_positions
+            return output_ids
         raise ValueError(f'Unsupported tensor type: {return_tensors}')
+    if return_image_token_positions:
+        return input_ids, image_token_positions
     return input_ids
 
 

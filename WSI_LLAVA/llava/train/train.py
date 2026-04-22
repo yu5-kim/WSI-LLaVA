@@ -474,6 +474,78 @@ def preprocess_llama_2(
     )
 
 
+def _build_alternating_conversations(
+    sources: Sequence[Sequence[Dict[str, str]]],
+    conv,
+    roles: Dict[str, str],
+) -> List[str]:
+    conversations: List[str] = []
+    for i, source in enumerate(sources):
+        if roles[source[0]["from"]] != conv.roles[0]:
+            source = source[1:]
+
+        conv.messages = []
+        for j, sentence in enumerate(source):
+            role = roles[sentence["from"]]
+            assert role == conv.roles[j % 2], f"{i}"
+            conv.append_message(role, sentence["value"])
+        conversations.append(conv.get_prompt())
+    return conversations
+
+
+def _segment_token_length(
+    text: str,
+    tokenizer: transformers.PreTrainedTokenizer,
+    has_image: bool,
+) -> int:
+    if has_image:
+        return len(tokenizer_image_token(text, tokenizer))
+    return len(tokenizer(text).input_ids)
+
+
+def _apply_round_length_adjustment(
+    round_len: int,
+    instruction_len: int,
+    *,
+    round_idx: int,
+    tokenizer: transformers.PreTrainedTokenizer,
+    non_legacy_delta: int = 0,
+    legacy_delta: int = 0,
+) -> Tuple[int, int]:
+    if round_idx == 0 or not IS_TOKENIZER_GREATER_THAN_0_14:
+        return round_len, instruction_len
+
+    is_legacy = bool(getattr(tokenizer, "legacy", False))
+    delta = legacy_delta if is_legacy else non_legacy_delta
+    return round_len + delta, instruction_len + delta
+
+
+def _get_round_and_instruction_len(
+    round_text: str,
+    instruction_text: str,
+    tokenizer: transformers.PreTrainedTokenizer,
+    *,
+    has_image: bool,
+    instruction_prefix_tokens: int,
+    round_idx: int,
+    non_legacy_delta: int = 0,
+    legacy_delta: int = 0,
+) -> Tuple[int, int]:
+    round_len = _segment_token_length(round_text, tokenizer, has_image=has_image)
+    instruction_len = (
+        _segment_token_length(instruction_text, tokenizer, has_image=has_image)
+        - instruction_prefix_tokens
+    )
+    return _apply_round_length_adjustment(
+        round_len,
+        instruction_len,
+        round_idx=round_idx,
+        tokenizer=tokenizer,
+        non_legacy_delta=non_legacy_delta,
+        legacy_delta=legacy_delta,
+    )
+
+
 def preprocess_v1(
     sources,
     tokenizer: transformers.PreTrainedTokenizer,
@@ -483,37 +555,7 @@ def preprocess_v1(
     roles = {"human": conv.roles[0], "gpt": conv.roles[1]}
 
     # Apply prompt templates
-    conversations = []
-    # for i, source in enumerate(sources):
-    #     if roles[source[0]["from"]] != conv.roles[0]:
-    #         # Skip the first one if it is not from human
-    #         source = source[1:]
-
-    #     conv.messages = []
-    #     for j, sentence in enumerate(source):
-    #         role = roles[sentence["from"]]
-    #         print(f"Checking role for sentence： {sentence} ") 
-    #         assert role == conv.roles[j % 2], f"{i}"
-    #         conv.append_message(role, sentence["value"])
-    #     conversations.append(conv.get_prompt())
-    for i, source in enumerate(sources):  
-        if roles[source[0]["from"]] != conv.roles[0]:  
-            # Skip the first one if it is not from human  
-            source = source[1:]  
-    
-        conv.messages = []  
-        try:  
-            for j, sentence in enumerate(source):  
-                role = roles[sentence["from"]]  
-                # print(f"Checking role for sentence: {sentence}")   
-                assert role == conv.roles[j % 2], f"Assertion failed at index {i}, sentence {j}: expected role {conv.roles[j % 2]}, but got {role}"  
-                conv.append_message(role, sentence["value"])  
-        except AssertionError as e:  
-            print(f"Error in conversation {i}: {e}")  
-            # Optionally, you can continue processing or break the loop here  
-        finally:  
-            # This block will always execute, regardless of whether an exception was raised or not  
-            conversations.append(conv.get_prompt())
+    conversations = _build_alternating_conversations(sources, conv, roles)
     # Tokenize conversations
 
     if has_image:
@@ -548,20 +590,16 @@ def preprocess_v1(
                 break
             parts[0] += sep
 
-            if has_image:
-                round_len = len(tokenizer_image_token(rou, tokenizer))
-                instruction_len = len(tokenizer_image_token(parts[0], tokenizer)) - 2
-            else:
-                round_len = len(tokenizer(rou).input_ids)
-                instruction_len = len(tokenizer(parts[0]).input_ids) - 2
-
-            if (
-                i != 0
-                and not tokenizer.legacy
-                and IS_TOKENIZER_GREATER_THAN_0_14
-            ):
-                round_len -= 1
-                instruction_len -= 1
+            round_len, instruction_len = _get_round_and_instruction_len(
+                rou,
+                parts[0],
+                tokenizer,
+                has_image=has_image,
+                instruction_prefix_tokens=2,
+                round_idx=i,
+                non_legacy_delta=-1,
+                legacy_delta=0,
+            )
 
             target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
 

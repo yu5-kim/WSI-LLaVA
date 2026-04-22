@@ -1,2 +1,33 @@
 .history
 .DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Experiment / logging
+wandb/
+tea_debug.log
+
+# WSI-Bench VQA/메트릭 산출물 (jsonl, tsv 등)
+WSI-Bench/Results/
+
+# 학습/병합 산출물 (레포 루트에만, WSI_LLAVA 기준 ../ 와 동일)
+/checkpoints_4gpu_3e/
+/logs/
+/merged_checkpoints/
+
+# Local env / IDE (optional noise)
+.env
+.venv/
+venv/
+.idea/
+.vscode/

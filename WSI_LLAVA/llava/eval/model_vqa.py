@@ -13,6 +13,10 @@ from PIL import Image
 import math
 
 
+def is_qwen_model(model_name: str) -> bool:
+    return "qwen" in (model_name or "").lower()
+
+
 def split_list(lst, n):
     chunk_size = math.ceil(len(lst) / n)
     return [lst[i:i+chunk_size] for i in range(0, len(lst), chunk_size)]
@@ -93,6 +97,8 @@ def eval_model(args):
     tokenizer, model, image_processor, context_len = load_pretrained_model(
         model_path, args.model_base, model_name
     )
+    is_qwen = is_qwen_model(model_name)
+    debug_printed = 0
 
     # ===== 1. Load question file =====
     questions = [json.loads(q) for q in open(os.path.expanduser(args.question_file), "r")]
@@ -130,42 +136,81 @@ def eval_model(args):
         Tanswer = line["T-answer"]
 
         cur_prompt = qs
-        if model.config.mm_use_im_start_end:
-            qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
+        image_token_for_prompt = (
+            DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
+            if model.config.mm_use_im_start_end
+            else DEFAULT_IMAGE_TOKEN
+        )
+        if DEFAULT_IMAGE_TOKEN not in image_token_for_prompt:
+            raise ValueError(
+                f"Invalid multimodal image token format for model '{model_name}': {image_token_for_prompt}"
+            )
+
+        if is_qwen:
+            user_content = image_token_for_prompt + '\n' + qs
+            messages = [{"role": "user", "content": user_content}]
+            prompt = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            if image_token_for_prompt not in prompt:
+                raise ValueError(
+                    "Qwen prompt serialization removed the expected image placeholder token: "
+                    f"{image_token_for_prompt}"
+                )
+            input_ids = tokenizer_image_token(
+                prompt,
+                tokenizer,
+                IMAGE_TOKEN_INDEX,
+                return_tensors='pt',
+                image_token=image_token_for_prompt,
+            ).unsqueeze(0).cuda()
         else:
-            qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
+            qs = image_token_for_prompt + '\n' + qs
+            conv = conv_templates[args.conv_mode].copy()
+            conv.append_message(conv.roles[0], qs)
+            conv.append_message(conv.roles[1], None)
+            prompt = conv.get_prompt()
+            input_ids = tokenizer_image_token(
+                prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt'
+            ).unsqueeze(0).cuda()
 
-        conv = conv_templates[args.conv_mode].copy()
-        conv.append_message(conv.roles[0], qs)
-        conv.append_message(conv.roles[1], None)
-        prompt = conv.get_prompt()
-
-        input_ids = tokenizer_image_token(
-            prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt'
-        ).unsqueeze(0).cuda()
         attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=input_ids.device)
 
         image_path = os.path.join(args.image_folder, image_file)
         image = load_image(image_path)
         image = sample_patch_features(image, args.patch_sample_ratio)
         image_tensor = image.to(model.device, dtype=torch.float16)
-        stop_words = []
-        if conv.sep2:
-            stop_words.append(conv.sep2)
-        stop_words.extend([
-            f"{conv.roles[0]}:",
-            "\nUSER:",
-            "\nASSISTANT:",
-            "\nHuman:",
-            "\nQUESTION:",
-            "\nTASK:",
-        ])
-        # preserve order while removing duplicates/empties
-        stop_words = list(dict.fromkeys([w for w in stop_words if w]))
-        stopping_criteria = [KeywordsStoppingCriteria(stop_words, tokenizer, input_ids)]
+        stopping_criteria = None
+        if not is_qwen:
+            stop_words = []
+            if conv.sep2:
+                stop_words.append(conv.sep2)
+            stop_words.extend([
+                f"{conv.roles[0]}:",
+                "\nUSER:",
+                "\nASSISTANT:",
+                "\nHuman:",
+                "\nQUESTION:",
+                "\nTASK:",
+            ])
+            # preserve order while removing duplicates/empties
+            stop_words = list(dict.fromkeys([w for w in stop_words if w]))
+            stopping_criteria = [KeywordsStoppingCriteria(stop_words, tokenizer, input_ids)]
+
+        if args.debug_prompt and debug_printed < args.debug_max_samples:
+            print("=" * 80)
+            print(f"[DEBUG] model_name={model_name}, family={'qwen' if is_qwen else 'llava'}")
+            print(f"[DEBUG] image_token_for_prompt={repr(image_token_for_prompt)}")
+            print(f"[DEBUG] prompt:\n{prompt}")
+            decoded_inputs = tokenizer.batch_decode(input_ids, skip_special_tokens=False)[0]
+            print(f"[DEBUG] decoded_input_ids:\n{decoded_inputs}")
+            print(f"[DEBUG] input_ids.shape={tuple(input_ids.shape)}")
+            debug_printed += 1
 
         with torch.inference_mode():
-            output_ids = model.generate(
+            generate_kwargs = dict(
                 input_ids,
                 attention_mask=attention_mask,
                 images=image_tensor.unsqueeze(0).half().cuda(),
@@ -180,8 +225,10 @@ def eval_model(args):
                 use_cache=True,
                 eos_token_id=tokenizer.eos_token_id,
                 pad_token_id=tokenizer.pad_token_id,
-                stopping_criteria=stopping_criteria,
             )
+            if stopping_criteria is not None:
+                generate_kwargs["stopping_criteria"] = stopping_criteria
+            output_ids = model.generate(**generate_kwargs)
 
         generated_ids = output_ids[:, input_ids.shape[1]:]
         outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
@@ -220,6 +267,10 @@ if __name__ == "__main__":
     parser.add_argument("--patch-sample-ratio", type=float, default=1.0,
                         help="Ratio of patch features to sample per slide during evaluation. "
                              "Use 1.0 to keep all patches.")
+    parser.add_argument("--debug-prompt", action="store_true",
+                        help="Print prompt/input_ids debug logs to verify model-family-specific prompt mapping.")
+    parser.add_argument("--debug-max-samples", type=int, default=3,
+                        help="Maximum number of samples to print prompt/input_ids debug logs for.")
     args = parser.parse_args()
 
     eval_model(args)

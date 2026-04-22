@@ -118,10 +118,21 @@ If you plan to replace the LLaVA language backbone with Qwen3, see the migration
 
 ### Merge Qwen LoRA into a single checkpoint for evaluation
 
-If you trained with LoRA on a Qwen backbone, you can merge adapter weights into one standalone model using the same merge utility:
+If you trained with LoRA on a Qwen backbone, you can merge adapter weights into one standalone model using the same merge utility.
+`merge_lora_weights.py` imports the LLaVA model builder, so the LLaVA package from this repository must be importable even when the language backbone is Qwen3:
 
 ```bash
-python WSI_LLAVA/scripts/merge_lora_weights.py \
+export PYTHONPATH=/path/to/WSI-LLaVA/WSI_LLAVA:$PYTHONPATH
+python /path/to/WSI-LLaVA/WSI_LLAVA/scripts/merge_lora_weights.py \
+  --model-path /path/to/qwen_lora_checkpoint \
+  --model-base /path/to/Qwen3-4B \
+  --save-model-path /path/to/qwen_merged_model
+```
+
+Or, if your current directory is `WSI_LLAVA/`:
+
+```bash
+python scripts/merge_lora_weights.py \
   --model-path /path/to/qwen_lora_checkpoint \
   --model-base /path/to/Qwen3-4B \
   --save-model-path /path/to/qwen_merged_model

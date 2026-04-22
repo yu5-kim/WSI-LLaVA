@@ -229,20 +229,54 @@ def eval_model(args):
     answers_file = os.path.expanduser(args.answers_file)
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
 
-    processed_ids = set()
-    if os.path.exists(answers_file) and os.path.getsize(answers_file) > 0:
+    def _load_existing_records(path):
+        processed = set()
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            return processed, 0
+
+        with open(path, "r", encoding="utf-8") as f:
+            raw = f.read()
+
+        decoder = json.JSONDecoder()
+        pos = 0
+        malformed = 0
+        n = len(raw)
+        while pos < n:
+            while pos < n and raw[pos].isspace():
+                pos += 1
+            if pos >= n:
+                break
+            try:
+                obj, next_pos = decoder.raw_decode(raw, pos)
+            except json.JSONDecodeError:
+                malformed += 1
+                next_nl = raw.find("\n", pos)
+                if next_nl == -1:
+                    break
+                pos = next_nl + 1
+                continue
+            qid = obj.get("question_id") if isinstance(obj, dict) else None
+            if qid:
+                processed.add(qid)
+            pos = next_pos
+        return processed, malformed
+
+    processed_ids, malformed_records = _load_existing_records(answers_file)
+    if processed_ids:
         print(f"Existing results file detected: {answers_file}")
-        with open(answers_file, "r") as f:
-            for line in f:
-                try:
-                    data = json.loads(line)
-                    processed_ids.add(data["question_id"])
-                except:
-                    continue
         print(f"Skipping {len(processed_ids)} already processed samples.")
-        ans_file = open(answers_file, "a")  # append mode
+        if malformed_records:
+            print(f"Warning: skipped {malformed_records} malformed JSON fragments in existing answers file.")
+        ans_file = open(answers_file, "a+", encoding="utf-8")
+        ans_file.seek(0, os.SEEK_END)
+        if ans_file.tell() > 0:
+            ans_file.seek(ans_file.tell() - 1)
+            tail = ans_file.read(1)
+            if tail != "\n":
+                ans_file.write("\n")
+        ans_file.seek(0, os.SEEK_END)
     else:
-        ans_file = open(answers_file, "w")
+        ans_file = open(answers_file, "w", encoding="utf-8")
         print(f"Creating new results file: {answers_file}")
 
     # ===== 3. Iterate over question list =====
@@ -315,6 +349,7 @@ def eval_model(args):
             "metadata": metadata
         }) + "\n")
         ans_file.flush()
+        processed_ids.add(idx)
 
     ans_file.close()
     print("All samples inference completed.")

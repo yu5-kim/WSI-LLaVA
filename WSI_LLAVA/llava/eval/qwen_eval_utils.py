@@ -1,4 +1,5 @@
 import re
+import torch
 
 from llava.constants import DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 from llava.conversation import conv_templates
@@ -40,3 +41,19 @@ def postprocess_output(text: str, qwen_mode: bool = False) -> str:
     if qwen_mode:
         output = re.sub(r"^\s*(assistant|ASSISTANT|Assistant)\s*:\s*", "", output)
     return output.strip()
+
+
+def extract_generated_ids(output_ids: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+    """
+    Robustly extract newly generated token ids.
+
+    Some multimodal wrappers call HF generate() with inputs_embeds instead of
+    input_ids, and the returned sequences can be generation-only (without prompt
+    prefix). In that case, do not slice by prompt length.
+    """
+    if output_ids.ndim != 2:
+        return output_ids
+    prompt_len = int(input_ids.shape[1]) if input_ids is not None and input_ids.ndim == 2 else 0
+    if prompt_len > 0 and output_ids.shape[1] > prompt_len:
+        return output_ids[:, prompt_len:]
+    return output_ids

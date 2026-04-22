@@ -10,6 +10,7 @@ from llava.conversation import conv_templates
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
 from llava.mm_utils import tokenizer_image_token, get_model_name_from_path, KeywordsStoppingCriteria
+from llava.eval.qwen_eval_utils import extract_generated_ids
 from PIL import Image
 import math
 
@@ -254,7 +255,7 @@ def eval_model(args):
                 stopping_criteria=stopping_criteria,
             )
 
-        generated_ids = output_ids[:, input_ids.shape[1]:]
+        generated_ids = extract_generated_ids(output_ids, input_ids)
         outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
         if qwen_mode:
             outputs = re.sub(r"^\s*(assistant|ASSISTANT|Assistant)\s*:\s*", "", outputs)

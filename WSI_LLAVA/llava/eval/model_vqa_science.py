@@ -9,7 +9,7 @@ from llava.constants import IMAGE_TOKEN_INDEX
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
 from llava.mm_utils import tokenizer_image_token, process_images, get_model_name_from_path
-from llava.eval.qwen_eval_utils import build_prompt, postprocess_output
+from llava.eval.qwen_eval_utils import build_prompt, postprocess_output, extract_generated_ids
 
 from PIL import Image
 import math
@@ -75,7 +75,7 @@ def eval_model(args):
                 use_cache=True,
             )
 
-        generated_ids = output_ids[:, input_ids.shape[1]:]
+        generated_ids = extract_generated_ids(output_ids, input_ids)
         outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
         outputs = postprocess_output(outputs, qwen_mode=qwen_mode)
 

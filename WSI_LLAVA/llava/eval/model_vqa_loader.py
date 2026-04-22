@@ -2,6 +2,7 @@ import argparse
 import torch
 import os
 import json
+import re
 from tqdm import tqdm
 import shortuuid
 
@@ -72,6 +73,44 @@ def create_data_loader(questions, image_folder, tokenizer, image_processor, mode
     dataset = CustomDataset(questions, image_folder, tokenizer, image_processor, model_config, model_name, conv_mode)
     data_loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False, collate_fn=collate_fn)
     return data_loader
+
+
+def trim_generated_answer(text):
+    if not text:
+        return text
+
+    stop_markers = [
+        "\nUSER:",
+        "\nASSISTANT:",
+        "\nHuman:",
+        "\nQuestion:",
+        "\nQUESTION:",
+        "\nTASK:",
+        "\nASK:",
+        "\nQ:",
+    ]
+    cut_pos = len(text)
+    for marker in stop_markers:
+        pos = text.find(marker)
+        if pos != -1:
+            cut_pos = min(cut_pos, pos)
+    text = text[:cut_pos].strip()
+    return text
+
+
+def is_qwen_family(model_name: str, tokenizer) -> bool:
+    lowered = (model_name or "").lower()
+    if any(k in lowered for k in ("qwen3", "qwen2", "qwen")):
+        return True
+    tok_name = str(getattr(tokenizer, "name_or_path", "")).lower()
+    tok_class = tokenizer.__class__.__name__.lower()
+    return "qwen" in tok_name or "qwen" in tok_class
+
+
+def postprocess_generated_text(text: str, qwen_mode: bool) -> str:
+    if qwen_mode:
+        text = re.sub(r"^\s*(assistant|ASSISTANT|Assistant)\s*:\s*", "", text or "")
+    return trim_generated_answer((text or "").strip())
 
 
 def eval_model(args):

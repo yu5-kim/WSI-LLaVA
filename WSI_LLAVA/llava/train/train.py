@@ -601,6 +601,8 @@ def _qwen_extract_assistant_mask(
     tokenizer: transformers.PreTrainedTokenizer,
     messages: List[Dict[str, str]],
 ) -> Optional[Tuple[List[int], List[int]]]:
+    # Keep key fallbacks to absorb tokenizer implementation differences
+    # across Qwen and compatible chat-template variants.
     try:
         tokenized = tokenizer.apply_chat_template(
             messages,
@@ -671,6 +673,8 @@ def preprocess_qwen_chat(
                             labels[i] = full_ids[i]
                     assistant_mask_used = True
 
+        # Always preserve span-based fallback when mask extraction is unavailable
+        # (mask_result is None) or lengths do not match full_ids.
         if not assistant_mask_used:
             def tokenize_text(text: str) -> List[int]:
                 if has_image:
@@ -694,6 +698,7 @@ def preprocess_qwen_chat(
                 start = len(tokenize_text(prev_text))
                 end = len(tokenize_text(cur_text))
                 if not (0 <= start < end <= len(full_ids)):
+                    # Keep this exact error prefix for debugging/searchability.
                     raise ValueError(
                         f"Qwen assistant span calculation failed: start={start}, end={end}, total={len(full_ids)}"
                     )

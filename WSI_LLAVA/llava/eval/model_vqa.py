@@ -228,6 +228,15 @@ def eval_model(args):
     # ===== 2. Check and load existing output file =====
     answers_file = os.path.expanduser(args.answers_file)
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
+    decode_dump_file = None
+    if args.dump_decode_stages:
+        decode_dump_path = args.decode_dump_file
+        if decode_dump_path is None:
+            decode_dump_path = f"{answers_file}.decode_stages.jsonl"
+        decode_dump_path = os.path.expanduser(decode_dump_path)
+        os.makedirs(os.path.dirname(decode_dump_path), exist_ok=True)
+        decode_dump_file = open(decode_dump_path, "a", encoding="utf-8")
+        print(f"Decode-stage dump enabled: {decode_dump_path}")
 
     def _load_existing_records(path):
         processed = set()
@@ -333,11 +342,26 @@ def eval_model(args):
             )
 
         generated_ids = slice_generated_tokens(output_ids, input_ids)
-        outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
-        outputs = trim_at_stop_strings(outputs, stop_words)
+        raw_decoded = tokenizer.batch_decode(generated_ids, skip_special_tokens=False)[0]
+        decoded_no_special = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        outputs = trim_at_stop_strings(decoded_no_special, stop_words)
         if qwen_mode:
             outputs = re.sub(r"^\s*(assistant|ASSISTANT|Assistant)\s*:\s*", "", outputs)
         outputs = trim_generated_answer(outputs)
+        if decode_dump_file is not None:
+            decode_dump_file.write(json.dumps({
+                "question_id": idx,
+                "image": image_file,
+                "prompt_format": prompt_format,
+                "prompt": prompt,
+                "input_token_count": int(input_ids.shape[1]),
+                "generated_token_count": int(generated_ids.shape[1]),
+                "raw_decoded": raw_decoded,
+                "decoded_no_special": decoded_no_special,
+                "post_stop_trim": trim_at_stop_strings(decoded_no_special, stop_words),
+                "final_output": outputs,
+            }, ensure_ascii=False) + "\n")
+            decode_dump_file.flush()
 
         ans_id = shortuuid.uuid()
         ans_file.write(json.dumps({
@@ -352,6 +376,8 @@ def eval_model(args):
         processed_ids.add(idx)
 
     ans_file.close()
+    if decode_dump_file is not None:
+        decode_dump_file.close()
     print("All samples inference completed.")
 
 
@@ -376,6 +402,25 @@ if __name__ == "__main__":
         default="auto",
         choices=["auto", "llava", "qwen"],
         help="Prompt format selection. auto chooses qwen template when a Qwen tokenizer/model is detected.",
+    )
+    parser.add_argument(
+        "--dump-decode-stages",
+        dest="dump_decode_stages",
+        action="store_true",
+        help="Dump raw decode -> post-stop-trim -> final output stages to JSONL for debugging.",
+    )
+    parser.add_argument(
+        "--no-dump-decode-stages",
+        dest="dump_decode_stages",
+        action="store_false",
+        help="Disable decode-stage debug dump.",
+    )
+    parser.set_defaults(dump_decode_stages=True)
+    parser.add_argument(
+        "--decode-dump-file",
+        type=str,
+        default=None,
+        help="Optional path for decode-stage dump JSONL. Defaults to <answers-file>.decode_stages.jsonl",
     )
     parser.add_argument("--patch-sample-ratio", type=float, default=1.0,
                         help="Ratio of patch features to sample per slide during evaluation. "

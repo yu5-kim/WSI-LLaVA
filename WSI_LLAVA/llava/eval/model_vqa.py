@@ -329,7 +329,7 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--num_beams", type=int, default=1)
-    parser.add_argument("--max_new_tokens", type=int, default=512)
+    parser.add_argument("--max_new_tokens", type=int, default=2048)
     parser.add_argument("--repetition_penalty", type=float, default=1.1)
     parser.add_argument("--patch-sample-ratio", type=float, default=1.0,
                         help="Ratio of patch features to sample per slide during evaluation. "

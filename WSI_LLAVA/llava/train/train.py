@@ -20,6 +20,7 @@ from dataclasses import dataclass, field, fields
 import json
 import logging
 import pathlib
+import re
 from typing import Dict, Optional, Sequence, List, Tuple
 
 import torch
@@ -432,7 +433,7 @@ def preprocess_qwen_chat_template(
         messages = []
         for sentence in source:
             role = "user" if sentence["from"] == "human" else "assistant"
-            messages.append({"role": role, "content": sentence["value"]})
+            messages.append({"role": role, "content": normalize_qwen_turn_content(role, sentence["value"])})
 
         serialized_prompt = tokenizer.apply_chat_template(
             messages,
@@ -677,7 +678,18 @@ def preprocess_v1(
     )
 
 
+def normalize_qwen_turn_content(role: str, content: str) -> str:
+    content = (content or "").strip()
+    if role == "assistant":
+        # Some LLaVA-format datasets contain leaked role prefixes in target
+        # strings (e.g., "ASSISTANT:", "Assistant:", "GPT:"). Strip only at
+        # the start so normal in-sentence text remains untouched.
+        content = re.sub(r"^\s*(assistant|ASSISTANT|Assistant|gpt|GPT)\s*:\s*", "", content)
+    return content
+
+
 def llava_sample_to_qwen_messages(sample: Dict, system_prompt: str) -> List[Dict[str, str]]:
+
     role_map = {"human": "user", "gpt": "assistant"}
     messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
 
@@ -687,7 +699,7 @@ def llava_sample_to_qwen_messages(sample: Dict, system_prompt: str) -> List[Dict
         role = role_map.get(sentence.get("from"))
         if role is None:
             continue
-        content = sentence.get("value", "")
+        content = normalize_qwen_turn_content(role, sentence.get("value", ""))
         if is_image_sample and role == "user" and DEFAULT_IMAGE_TOKEN not in content:
             content = f"{DEFAULT_IMAGE_TOKEN}\n{content}"
         messages.append({"role": role, "content": content})

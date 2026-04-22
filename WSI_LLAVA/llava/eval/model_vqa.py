@@ -8,7 +8,7 @@ from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_S
 from llava.conversation import conv_templates
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
-from llava.mm_utils import tokenizer_image_token, get_model_name_from_path
+from llava.mm_utils import tokenizer_image_token, get_model_name_from_path, KeywordsStoppingCriteria
 from PIL import Image
 import math
 
@@ -46,6 +46,44 @@ def sample_patch_features(image, patch_sample_ratio):
     sampled_indices = torch.randperm(num_patches, device=image.device)[:sampled_patch_count]
     sampled_indices, _ = torch.sort(sampled_indices)
     return image.index_select(0, sampled_indices)
+
+
+def trim_generated_answer(text):
+    """Trim leaked multi-turn prefixes and noisy numeric tails."""
+    if not text:
+        return text
+
+    stop_markers = [
+        "\nUSER:",
+        "\nASSISTANT:",
+        "\nHuman:",
+        "\nQuestion:",
+        "\nQUESTION:",
+        "\nTASK:",
+        "\nASK:",
+        "\nQ:",
+    ]
+    cut_pos = len(text)
+    for marker in stop_markers:
+        pos = text.find(marker)
+        if pos != -1:
+            cut_pos = min(cut_pos, pos)
+    text = text[:cut_pos].strip()
+
+    cleaned_lines = []
+    prev = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        numeric_like = sum(ch.isdigit() for ch in line) > max(16, int(0.7 * len(line)))
+        if numeric_like:
+            break
+        if line == prev:
+            continue
+        cleaned_lines.append(line)
+        prev = line
+    return "\n".join(cleaned_lines).strip()
 
 
 def eval_model(args):
@@ -111,6 +149,20 @@ def eval_model(args):
         image = load_image(image_path)
         image = sample_patch_features(image, args.patch_sample_ratio)
         image_tensor = image.to(model.device, dtype=torch.float16)
+        stop_words = []
+        if conv.sep2:
+            stop_words.append(conv.sep2)
+        stop_words.extend([
+            f"{conv.roles[0]}:",
+            "\nUSER:",
+            "\nASSISTANT:",
+            "\nHuman:",
+            "\nQUESTION:",
+            "\nTASK:",
+        ])
+        # preserve order while removing duplicates/empties
+        stop_words = list(dict.fromkeys([w for w in stop_words if w]))
+        stopping_criteria = [KeywordsStoppingCriteria(stop_words, tokenizer, input_ids)]
 
         with torch.inference_mode():
             output_ids = model.generate(
@@ -123,11 +175,17 @@ def eval_model(args):
                 top_p=args.top_p,
                 num_beams=args.num_beams,
                 no_repeat_ngram_size=3,
-                max_new_tokens=2048,
+                repetition_penalty=args.repetition_penalty,
+                max_new_tokens=args.max_new_tokens,
                 use_cache=True,
+                eos_token_id=tokenizer.eos_token_id,
+                pad_token_id=tokenizer.pad_token_id,
+                stopping_criteria=stopping_criteria,
             )
 
-        outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
+        generated_ids = output_ids[:, input_ids.shape[1]:]
+        outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        outputs = trim_generated_answer(outputs)
 
         ans_id = shortuuid.uuid()
         ans_file.write(json.dumps({
@@ -157,6 +215,8 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--num_beams", type=int, default=1)
+    parser.add_argument("--max_new_tokens", type=int, default=512)
+    parser.add_argument("--repetition_penalty", type=float, default=1.1)
     parser.add_argument("--patch-sample-ratio", type=float, default=1.0,
                         help="Ratio of patch features to sample per slide during evaluation. "
                              "Use 1.0 to keep all patches.")

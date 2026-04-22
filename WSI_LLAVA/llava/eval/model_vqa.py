@@ -11,6 +11,7 @@ from llava.utils import disable_torch_init
 from llava.mm_utils import tokenizer_image_token, get_model_name_from_path, KeywordsStoppingCriteria
 from PIL import Image
 import math
+from typing import List
 
 
 def split_list(lst, n):
@@ -86,6 +87,96 @@ def trim_generated_answer(text):
     return "\n".join(cleaned_lines).strip()
 
 
+
+
+def _normalize_token_ids(value) -> List[int]:
+    if value is None:
+        return []
+    if isinstance(value, int):
+        candidates = [value]
+    elif isinstance(value, (list, tuple, set)):
+        candidates = list(value)
+    else:
+        return []
+
+    normalized = []
+    for token_id in candidates:
+        try:
+            token_id = int(token_id)
+        except (TypeError, ValueError):
+            continue
+        if token_id >= 0:
+            normalized.append(token_id)
+    return list(dict.fromkeys(normalized))
+
+
+def _resolve_generation_stop_tokens(tokenizer, model):
+    tokenizer_eos_ids = _normalize_token_ids(getattr(tokenizer, "eos_token_id", None))
+    generation_eos_ids = _normalize_token_ids(getattr(model.generation_config, "eos_token_id", None))
+    eos_token_ids = list(dict.fromkeys(tokenizer_eos_ids + generation_eos_ids))
+    if not eos_token_ids:
+        raise ValueError("No valid eos_token_id found in tokenizer/model.generation_config")
+
+    tokenizer_pad = getattr(tokenizer, "pad_token_id", None)
+    generation_pad = getattr(model.generation_config, "pad_token_id", None)
+    pad_token_id = tokenizer_pad if tokenizer_pad is not None else generation_pad
+    if pad_token_id is None:
+        pad_token_id = eos_token_ids[0]
+
+    return eos_token_ids, int(pad_token_id)
+
+
+def _build_stop_words(model_name, tokenizer, conv):
+    model_name_l = (model_name or "").lower()
+    tokenizer_name_l = getattr(tokenizer, "name_or_path", "").lower()
+    stop_words = []
+
+    if "qwen" in model_name_l or "qwen" in tokenizer_name_l:
+        chat_template = getattr(tokenizer, "chat_template", None) or ""
+
+        template_based = []
+        if "<|im_start|>assistant" in chat_template:
+            template_based.append("<|im_start|>assistant")
+        if "<|im_start|>user" in chat_template:
+            template_based.append("<|im_start|>user")
+        if "<|assistant|>" in chat_template:
+            template_based.append("<|assistant|>")
+        if "<|user|>" in chat_template:
+            template_based.append("<|user|>")
+
+        for marker in list(template_based):
+            if not marker.startswith("\n"):
+                template_based.append("\n" + marker)
+        stop_words.extend(template_based)
+
+    else:
+        # LLaVA-like templates
+        stop_words.extend([conv.sep, conv.sep2])
+        stop_words.extend([
+            f"{conv.roles[0]}:",
+            "\nUSER:",
+            "\nASSISTANT:",
+            "\nHuman:",
+            "\nQUESTION:",
+            "\nTASK:",
+        ])
+
+    return list(dict.fromkeys([w for w in stop_words if w]))
+
+
+def _infer_stop_reason(generated_ids, decoded_text, eos_token_ids, stop_words, max_new_tokens):
+    generated_list = generated_ids.tolist()
+    if generated_list and generated_list[-1] in set(eos_token_ids):
+        return f"eos_token_id={generated_list[-1]}"
+
+    for stop_word in stop_words:
+        if stop_word and stop_word in decoded_text:
+            return f"stopping_criteria(keyword='{stop_word}')"
+
+    if generated_ids.shape[0] >= max_new_tokens:
+        return "max_new_tokens"
+    return "unknown"
+
 def eval_model(args):
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
@@ -149,19 +240,8 @@ def eval_model(args):
         image = load_image(image_path)
         image = sample_patch_features(image, args.patch_sample_ratio)
         image_tensor = image.to(model.device, dtype=torch.float16)
-        stop_words = []
-        if conv.sep2:
-            stop_words.append(conv.sep2)
-        stop_words.extend([
-            f"{conv.roles[0]}:",
-            "\nUSER:",
-            "\nASSISTANT:",
-            "\nHuman:",
-            "\nQUESTION:",
-            "\nTASK:",
-        ])
-        # preserve order while removing duplicates/empties
-        stop_words = list(dict.fromkeys([w for w in stop_words if w]))
+        eos_token_ids, pad_token_id = _resolve_generation_stop_tokens(tokenizer, model)
+        stop_words = _build_stop_words(model_name, tokenizer, conv)
         stopping_criteria = [KeywordsStoppingCriteria(stop_words, tokenizer, input_ids)]
 
         with torch.inference_mode():
@@ -178,14 +258,27 @@ def eval_model(args):
                 repetition_penalty=args.repetition_penalty,
                 max_new_tokens=args.max_new_tokens,
                 use_cache=True,
-                eos_token_id=tokenizer.eos_token_id,
-                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=eos_token_ids,
+                pad_token_id=pad_token_id,
                 stopping_criteria=stopping_criteria,
             )
 
         generated_ids = output_ids[:, input_ids.shape[1]:]
-        outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
-        outputs = trim_generated_answer(outputs)
+        raw_outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        stop_reason = _infer_stop_reason(
+            generated_ids[0],
+            raw_outputs,
+            eos_token_ids=eos_token_ids,
+            stop_words=stop_words,
+            max_new_tokens=args.max_new_tokens,
+        )
+        print(
+            f"[DEBUG][stop] question_id={idx} reason={stop_reason} "
+            f"gen_tokens={generated_ids.shape[1]} eos_token_ids={eos_token_ids} pad_token_id={pad_token_id} "
+            f"stop_words={stop_words}"
+        )
+
+        outputs = trim_generated_answer(raw_outputs)
 
         ans_id = shortuuid.uuid()
         ans_file.write(json.dumps({

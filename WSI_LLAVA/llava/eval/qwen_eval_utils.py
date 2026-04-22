@@ -55,5 +55,9 @@ def extract_generated_ids(output_ids: torch.Tensor, input_ids: torch.Tensor) -> 
         return output_ids
     prompt_len = int(input_ids.shape[1]) if input_ids is not None and input_ids.ndim == 2 else 0
     if prompt_len > 0 and output_ids.shape[1] > prompt_len:
-        return output_ids[:, prompt_len:]
+        # Slice only when output actually contains prompt prefix.
+        # Some multimodal wrappers return generation-only sequences.
+        prefix_len = min(prompt_len, output_ids.shape[1])
+        if prefix_len > 0 and torch.equal(output_ids[:, :prefix_len], input_ids[:, :prefix_len]):
+            return output_ids[:, prompt_len:]
     return output_ids

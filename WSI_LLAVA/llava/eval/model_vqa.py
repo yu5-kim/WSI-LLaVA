@@ -281,6 +281,7 @@ def eval_model(args):
                 "input_token_len": int(input_ids.shape[1]),
                 "output_token_len": int(output_ids.shape[1]),
                 "generated_token_len": int(generated_ids.shape[1]),
+                "sliced_prompt_prefix": bool(generated_ids.shape[1] != output_ids.shape[1]),
                 "input_head_ids": input_ids[0][:16].tolist(),
                 "output_head_ids": output_ids[0][:16].tolist(),
                 "generated_head_ids": generated_ids[0][:16].tolist(),

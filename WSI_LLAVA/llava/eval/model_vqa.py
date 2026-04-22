@@ -215,6 +215,39 @@ def slice_generated_tokens(output_ids, input_ids):
     return output_ids[:, prompt_token_len:]
 
 
+def load_existing_record_ids(path, key_name="question_id"):
+    processed = set()
+    malformed = 0
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return processed, malformed
+
+    with open(path, "r", encoding="utf-8") as f:
+        raw = f.read()
+
+    decoder = json.JSONDecoder()
+    pos = 0
+    n = len(raw)
+    while pos < n:
+        while pos < n and raw[pos].isspace():
+            pos += 1
+        if pos >= n:
+            break
+        try:
+            obj, next_pos = decoder.raw_decode(raw, pos)
+        except json.JSONDecodeError:
+            malformed += 1
+            next_nl = raw.find("\n", pos)
+            if next_nl == -1:
+                break
+            pos = next_nl + 1
+            continue
+        record_id = obj.get(key_name) if isinstance(obj, dict) else None
+        if record_id:
+            processed.add(record_id)
+        pos = next_pos
+    return processed, malformed
+
+
 def eval_model(args):
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
@@ -231,48 +264,22 @@ def eval_model(args):
     answers_file = os.path.expanduser(args.answers_file)
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
     decode_dump_file = None
+    dumped_ids = set()
     if args.dump_decode_stages:
         decode_dump_path = args.decode_dump_file
         if decode_dump_path is None:
             decode_dump_path = f"{answers_file}.decode_stages.jsonl"
         decode_dump_path = os.path.expanduser(decode_dump_path)
         os.makedirs(os.path.dirname(decode_dump_path), exist_ok=True)
+        dumped_ids, malformed_dump_records = load_existing_record_ids(decode_dump_path)
         decode_dump_file = open(decode_dump_path, "a", encoding="utf-8")
         print(f"Decode-stage dump enabled: {decode_dump_path}")
+        if dumped_ids:
+            print(f"Decode-stage dump: {len(dumped_ids)} existing question_id entries will be de-duplicated.")
+        if malformed_dump_records:
+            print(f"Warning: skipped {malformed_dump_records} malformed JSON fragments in decode dump file.")
 
-    def _load_existing_records(path):
-        processed = set()
-        if not os.path.exists(path) or os.path.getsize(path) == 0:
-            return processed, 0
-
-        with open(path, "r", encoding="utf-8") as f:
-            raw = f.read()
-
-        decoder = json.JSONDecoder()
-        pos = 0
-        malformed = 0
-        n = len(raw)
-        while pos < n:
-            while pos < n and raw[pos].isspace():
-                pos += 1
-            if pos >= n:
-                break
-            try:
-                obj, next_pos = decoder.raw_decode(raw, pos)
-            except json.JSONDecodeError:
-                malformed += 1
-                next_nl = raw.find("\n", pos)
-                if next_nl == -1:
-                    break
-                pos = next_nl + 1
-                continue
-            qid = obj.get("question_id") if isinstance(obj, dict) else None
-            if qid:
-                processed.add(qid)
-            pos = next_pos
-        return processed, malformed
-
-    processed_ids, malformed_records = _load_existing_records(answers_file)
+    processed_ids, malformed_records = load_existing_record_ids(answers_file)
     if processed_ids:
         print(f"Existing results file detected: {answers_file}")
         print(f"Skipping {len(processed_ids)} already processed samples.")
@@ -351,19 +358,21 @@ def eval_model(args):
             outputs = re.sub(r"^\s*(assistant|ASSISTANT|Assistant)\s*:\s*", "", outputs)
         outputs = trim_generated_answer(outputs)
         if decode_dump_file is not None:
-            decode_dump_file.write(json.dumps({
-                "question_id": idx,
-                "image": image_file,
-                "prompt_format": prompt_format,
-                "prompt": prompt,
-                "input_token_count": int(input_ids.shape[1]),
-                "generated_token_count": int(generated_ids.shape[1]),
-                "raw_decoded": raw_decoded,
-                "decoded_no_special": decoded_no_special,
-                "post_stop_trim": trim_at_stop_strings(decoded_no_special, stop_words),
-                "final_output": outputs,
-            }, ensure_ascii=False) + "\n")
-            decode_dump_file.flush()
+            if idx not in dumped_ids:
+                decode_dump_file.write(json.dumps({
+                    "question_id": idx,
+                    "image": image_file,
+                    "prompt_format": prompt_format,
+                    "prompt": prompt,
+                    "input_token_count": int(input_ids.shape[1]),
+                    "generated_token_count": int(generated_ids.shape[1]),
+                    "raw_decoded": raw_decoded,
+                    "decoded_no_special": decoded_no_special,
+                    "post_stop_trim": trim_at_stop_strings(decoded_no_special, stop_words),
+                    "final_output": outputs,
+                }, ensure_ascii=False) + "\n")
+                decode_dump_file.flush()
+                dumped_ids.add(idx)
 
         ans_id = shortuuid.uuid()
         ans_file.write(json.dumps({

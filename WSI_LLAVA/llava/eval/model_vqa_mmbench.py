@@ -6,11 +6,17 @@ import pandas as pd
 from tqdm import tqdm
 import shortuuid
 
-from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from llava.constants import IMAGE_TOKEN_INDEX
 from llava.conversation import conv_templates, SeparatorStyle
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
-from llava.mm_utils import tokenizer_image_token, process_images, load_image_from_base64, get_model_name_from_path
+from llava.mm_utils import (
+    tokenizer_image_token,
+    process_images,
+    load_image_from_base64,
+    get_model_name_from_path,
+    get_image_token_for_serialization,
+)
 
 from PIL import Image
 import math
@@ -87,10 +93,8 @@ def eval_model(args):
             for option_char, option in zip(all_options[:len(options)], options):
                 question = question + '\n' + option_char + '. ' + option
             qs = cur_prompt = question
-            if model.config.mm_use_im_start_end:
-                qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
-            else:
-                qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
+            serialized_image_token = get_image_token_for_serialization(getattr(model.config, 'mm_use_im_start_end', False))
+            qs = f"{serialized_image_token}\n{qs}"
 
             if args.single_pred_prompt:
                 if args.lang == 'cn':
@@ -103,7 +107,13 @@ def eval_model(args):
             conv.append_message(conv.roles[1], None)
             prompt = conv.get_prompt()
 
-            input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
+            input_ids = tokenizer_image_token(
+                prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt', image_token=serialized_image_token
+            )
+            assert prompt.count(serialized_image_token) == int((input_ids == IMAGE_TOKEN_INDEX).sum().item()), (
+                f"Image token mismatch (mm_use_im_start_end={getattr(model.config, 'mm_use_im_start_end', False)})"
+            )
+            input_ids = input_ids.unsqueeze(0).cuda()
 
             image_tensor = process_images([image], image_processor, model.config)[0]
 

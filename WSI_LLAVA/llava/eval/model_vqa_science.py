@@ -5,11 +5,11 @@ import json
 from tqdm import tqdm
 import shortuuid
 
-from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from llava.constants import IMAGE_TOKEN_INDEX
 from llava.conversation import conv_templates, SeparatorStyle
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
-from llava.mm_utils import tokenizer_image_token, process_images, get_model_name_from_path
+from llava.mm_utils import tokenizer_image_token, process_images, get_model_name_from_path, get_image_token_for_serialization
 
 from PIL import Image
 import math
@@ -44,16 +44,16 @@ def eval_model(args):
         qs = question['value'].replace('<image>', '').strip()
         cur_prompt = qs
 
+        serialized_image_token = get_image_token_for_serialization(
+            getattr(model.config, 'mm_use_im_start_end', False)
+        )
         if 'image' in line:
             image_file = line["image"]
             image = Image.open(os.path.join(args.image_folder, image_file))
             image_tensor = process_images([image], image_processor, model.config)[0]
             images = image_tensor.unsqueeze(0).half().cuda()
             image_sizes = [image.size]
-            if getattr(model.config, 'mm_use_im_start_end', False):
-                qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
-            else:
-                qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
+            qs = f"{serialized_image_token}\n{qs}"
             cur_prompt = '<image>' + '\n' + cur_prompt
         else:
             images = None
@@ -68,7 +68,13 @@ def eval_model(args):
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
 
-        input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
+        input_ids = tokenizer_image_token(
+            prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt', image_token=serialized_image_token
+        )
+        assert prompt.count(serialized_image_token) == int((input_ids == IMAGE_TOKEN_INDEX).sum().item()), (
+            f"Image token mismatch (mm_use_im_start_end={getattr(model.config, 'mm_use_im_start_end', False)})"
+        )
+        input_ids = input_ids.unsqueeze(0).cuda()
 
         with torch.inference_mode():
             output_ids = model.generate(

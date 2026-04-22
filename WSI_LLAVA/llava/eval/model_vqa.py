@@ -5,11 +5,16 @@ import json
 import re
 from tqdm import tqdm
 import shortuuid
-from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from llava.constants import IMAGE_TOKEN_INDEX
 from llava.conversation import conv_templates
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
-from llava.mm_utils import tokenizer_image_token, get_model_name_from_path, KeywordsStoppingCriteria
+from llava.mm_utils import (
+    tokenizer_image_token,
+    get_model_name_from_path,
+    KeywordsStoppingCriteria,
+    get_image_token_for_serialization,
+)
 from PIL import Image
 import math
 
@@ -98,8 +103,11 @@ def is_qwen_family(model_name: str, tokenizer) -> bool:
 
 def build_prompt_and_stop_words(cur_prompt, model, model_name, tokenizer, args):
     qwen_mode = is_qwen_family(model_name, tokenizer) and hasattr(tokenizer, "apply_chat_template")
+    serialized_image_token = get_image_token_for_serialization(
+        getattr(model.config, "mm_use_im_start_end", False)
+    )
     if qwen_mode:
-        user_content = f"{DEFAULT_IMAGE_TOKEN}\n{cur_prompt}"
+        user_content = f"{serialized_image_token}\n{cur_prompt}"
         messages = [{"role": "user", "content": user_content}]
         prompt = tokenizer.apply_chat_template(
             messages,
@@ -115,12 +123,9 @@ def build_prompt_and_stop_words(cur_prompt, model, model_name, tokenizer, args):
             "USER:",
             "ASSISTANT:",
         ]
-        return prompt, stop_words, qwen_mode
+        return prompt, stop_words, qwen_mode, serialized_image_token
 
-    if model.config.mm_use_im_start_end:
-        qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + cur_prompt
-    else:
-        qs = DEFAULT_IMAGE_TOKEN + '\n' + cur_prompt
+    qs = f"{serialized_image_token}\n{cur_prompt}"
 
     conv = conv_templates[args.conv_mode].copy()
     conv.append_message(conv.roles[0], qs)
@@ -138,7 +143,7 @@ def build_prompt_and_stop_words(cur_prompt, model, model_name, tokenizer, args):
         "\nQUESTION:",
         "\nTASK:",
     ])
-    return prompt, stop_words, qwen_mode
+    return prompt, stop_words, qwen_mode, serialized_image_token
 
 
 def resolve_generation_eos_and_pad(model, tokenizer):
@@ -210,13 +215,17 @@ def eval_model(args):
         Tanswer = line["T-answer"]
 
         cur_prompt = qs
-        prompt, stop_words, qwen_mode = build_prompt_and_stop_words(
+        prompt, stop_words, qwen_mode, serialized_image_token = build_prompt_and_stop_words(
             cur_prompt, model, model_name, tokenizer, args
         )
 
         input_ids = tokenizer_image_token(
-            prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt'
-        ).unsqueeze(0).cuda()
+            prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt', image_token=serialized_image_token
+        )
+        assert prompt.count(serialized_image_token) == int((input_ids == IMAGE_TOKEN_INDEX).sum().item()), (
+            f"Image token mismatch (mm_use_im_start_end={getattr(model.config, 'mm_use_im_start_end', False)})"
+        )
+        input_ids = input_ids.unsqueeze(0).cuda()
         attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=input_ids.device)
 
         image_path = os.path.join(args.image_folder, image_file)

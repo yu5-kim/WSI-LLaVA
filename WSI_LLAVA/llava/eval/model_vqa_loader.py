@@ -5,11 +5,11 @@ import json
 from tqdm import tqdm
 import shortuuid
 
-from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
+from llava.constants import IMAGE_TOKEN_INDEX
 from llava.conversation import conv_templates, SeparatorStyle
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
-from llava.mm_utils import tokenizer_image_token, process_images, get_model_name_from_path
+from llava.mm_utils import tokenizer_image_token, process_images, get_model_name_from_path, get_image_token_for_serialization
 from torch.utils.data import Dataset, DataLoader
 
 from PIL import Image
@@ -40,10 +40,8 @@ class CustomDataset(Dataset):
         line = self.questions[index]
         image_file = line["image"]
         qs = line["text"]
-        if self.model_config.mm_use_im_start_end:
-            qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
-        else:
-            qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
+        serialized_image_token = get_image_token_for_serialization(self.model_config.mm_use_im_start_end)
+        qs = f"{serialized_image_token}\n{qs}"
 
         conv = conv_templates[args.conv_mode].copy()
         conv.append_message(conv.roles[0], qs)
@@ -53,7 +51,12 @@ class CustomDataset(Dataset):
         image = Image.open(os.path.join(self.image_folder, image_file)).convert('RGB')
         image_tensor = process_images([image], self.image_processor, self.model_config)[0]
 
-        input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
+        input_ids = tokenizer_image_token(
+            prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt', image_token=serialized_image_token
+        )
+        assert prompt.count(serialized_image_token) == int((input_ids == IMAGE_TOKEN_INDEX).sum().item()), (
+            f"Image token mismatch (mm_use_im_start_end={self.model_config.mm_use_im_start_end})"
+        )
 
         return input_ids, image_tensor, image.size
 

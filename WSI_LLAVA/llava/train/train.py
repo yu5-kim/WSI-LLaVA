@@ -34,7 +34,7 @@ from llava.train.llava_trainer import LLaVATrainer
 
 from llava import conversation as conversation_lib
 from llava.model import *
-from llava.mm_utils import tokenizer_image_token
+from llava.mm_utils import tokenizer_image_token, get_image_token_for_serialization
 
 from PIL import Image
 
@@ -393,11 +393,6 @@ def preprocess_multimodal(
     return sources
 
 
-def _qwen_image_token_for_serializer(data_args: DataArguments) -> str:
-    if data_args.mm_use_im_start_end:
-        return f"{DEFAULT_IM_START_TOKEN}{DEFAULT_IMAGE_TOKEN}{DEFAULT_IM_END_TOKEN}"
-    return DEFAULT_IMAGE_TOKEN
-
 
 def _normalize_qwen_multimodal_user_content(source: Sequence[Dict], data_args: DataArguments) -> Sequence[Dict]:
     """Normalize Qwen multimodal user message to start with '<image>\\n'."""
@@ -413,7 +408,7 @@ def _normalize_qwen_multimodal_user_content(source: Sequence[Dict], data_args: D
         break
 
     if image_seen:
-        replace_token = _qwen_image_token_for_serializer(data_args)
+        replace_token = get_image_token_for_serialization(data_args.mm_use_im_start_end)
         for sentence in source:
             sentence["value"] = sentence["value"].replace(DEFAULT_IMAGE_TOKEN, replace_token)
     return source
@@ -427,7 +422,7 @@ def preprocess_qwen_chat_template(
 ) -> Dict:
     input_ids_list, labels_list = [], []
     image_anchor_counts, image_insert_counts = [], []
-    image_token_for_serializer = _qwen_image_token_for_serializer(data_args)
+    image_token_for_serializer = get_image_token_for_serialization(data_args.mm_use_im_start_end)
 
     for source in sources:
         messages = []
@@ -447,6 +442,16 @@ def preprocess_qwen_chat_template(
             return_image_token_positions=True,
         )
         cur_input_ids = torch.tensor(cur_input_ids, dtype=torch.long)
+        expected_anchor_count = serialized_prompt.count(image_token_for_serializer)
+        actual_insert_count = int((cur_input_ids == IMAGE_TOKEN_INDEX).sum().item())
+        assert expected_anchor_count == len(anchor_positions), (
+            f"Image anchor mismatch (mm_use_im_start_end={data_args.mm_use_im_start_end}): "
+            f"expected {expected_anchor_count}, got {len(anchor_positions)}"
+        )
+        assert expected_anchor_count == actual_insert_count, (
+            f"IMAGE_TOKEN_INDEX insert mismatch (mm_use_im_start_end={data_args.mm_use_im_start_end}): "
+            f"expected {expected_anchor_count}, got {actual_insert_count}"
+        )
         cur_labels = torch.full_like(cur_input_ids, IGNORE_INDEX)
 
         for msg_idx, message in enumerate(messages):
@@ -469,7 +474,7 @@ def preprocess_qwen_chat_template(
         input_ids_list.append(cur_input_ids)
         labels_list.append(cur_labels)
         image_anchor_counts.append(len(anchor_positions))
-        image_insert_counts.append(int((cur_input_ids == IMAGE_TOKEN_INDEX).sum().item()))
+        image_insert_counts.append(actual_insert_count)
 
     return dict(
         input_ids=input_ids_list,

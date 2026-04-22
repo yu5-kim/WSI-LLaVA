@@ -3,9 +3,6 @@ import torch
 import os
 from llava.constants import (
     IMAGE_TOKEN_INDEX,
-    DEFAULT_IMAGE_TOKEN,
-    DEFAULT_IM_START_TOKEN,
-    DEFAULT_IM_END_TOKEN,
     IMAGE_PLACEHOLDER,
 )
 from llava.conversation import conv_templates, SeparatorStyle
@@ -15,6 +12,7 @@ from llava.mm_utils import (
     process_images,
     tokenizer_image_token,
     get_model_name_from_path,
+    get_image_token_for_serialization,
 )
 
 from PIL import Image
@@ -60,17 +58,13 @@ def eval_model(args):
     )
 
     qs = args.query
-    image_token_se = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN
+    serialized_image_token = get_image_token_for_serialization(
+        getattr(model.config, "mm_use_im_start_end", False)
+    )
     if IMAGE_PLACEHOLDER in qs:
-        if model.config.mm_use_im_start_end:
-            qs = re.sub(IMAGE_PLACEHOLDER, image_token_se, qs)
-        else:
-            qs = re.sub(IMAGE_PLACEHOLDER, DEFAULT_IMAGE_TOKEN, qs)
+        qs = re.sub(IMAGE_PLACEHOLDER, serialized_image_token, qs)
     else:
-        if model.config.mm_use_im_start_end:
-            qs = image_token_se + "\n" + qs
-        else:
-            qs = DEFAULT_IMAGE_TOKEN + "\n" + qs
+        qs = f"{serialized_image_token}\n{qs}"
 
     if "llama-2" in model_name.lower():
         conv_mode = "llava_llama_2"
@@ -123,9 +117,18 @@ def eval_model(args):
     # ).to(model.device, dtype=torch.float16)
     images_tensor= image.to(model.device, dtype=torch.float16)
     input_ids = (
-        tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
+        tokenizer_image_token(
+            prompt,
+            tokenizer,
+            IMAGE_TOKEN_INDEX,
+            return_tensors="pt",
+            image_token=serialized_image_token,
+        )
         .unsqueeze(0)
         .cuda()
+    )
+    assert prompt.count(serialized_image_token) == int((input_ids == IMAGE_TOKEN_INDEX).sum().item()), (
+        f"Image token mismatch (mm_use_im_start_end={getattr(model.config, 'mm_use_im_start_end', False)})"
     )
 
     with torch.inference_mode():

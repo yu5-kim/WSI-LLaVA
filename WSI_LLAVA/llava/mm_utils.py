@@ -6,7 +6,23 @@ import math
 import ast
 
 from transformers import StoppingCriteria
-from llava.constants import IMAGE_TOKEN_INDEX
+from llava.constants import (
+    IMAGE_TOKEN_INDEX,
+    DEFAULT_IMAGE_TOKEN,
+    DEFAULT_IM_START_TOKEN,
+    DEFAULT_IM_END_TOKEN,
+)
+
+
+def get_image_token_for_serialization(mm_use_im_start_end: bool) -> str:
+    """Return the canonical image serialization token for prompt/tokenizer alignment."""
+    if mm_use_im_start_end:
+        return f"{DEFAULT_IM_START_TOKEN}{DEFAULT_IMAGE_TOKEN}{DEFAULT_IM_END_TOKEN}"
+    return DEFAULT_IMAGE_TOKEN
+
+
+assert get_image_token_for_serialization(True) == f"{DEFAULT_IM_START_TOKEN}{DEFAULT_IMAGE_TOKEN}{DEFAULT_IM_END_TOKEN}"
+assert get_image_token_for_serialization(False) == DEFAULT_IMAGE_TOKEN
 
 
 def select_best_resolution(original_size, possible_resolutions):

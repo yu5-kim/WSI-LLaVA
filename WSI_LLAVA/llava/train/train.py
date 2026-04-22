@@ -846,16 +846,22 @@ def preprocess(
     3. Tokenize the concatenated conversation;
     4. Make a deepcopy as the target. Mask human words with IGNORE_INDEX.
     """
-    if conversation_lib.default_conversation.sep_style == conversation_lib.SeparatorStyle.PLAIN:
-        return preprocess_plain(sources, tokenizer)
-    if conversation_lib.default_conversation.sep_style == conversation_lib.SeparatorStyle.LLAMA_2:
+    sep_style = conversation_lib.default_conversation.sep_style
+    conv_version = conversation_lib.default_conversation.version
+
+    # Branch precedence (keep this order to avoid merge regressions):
+    # llama2 -> v1(qwen/non-qwen) -> mpt -> plain -> legacy fallback.
+    if sep_style == conversation_lib.SeparatorStyle.LLAMA_2:
         return preprocess_llama_2(sources, tokenizer, has_image=has_image)
-    if conversation_lib.default_conversation.version.startswith("v1"):
+    if conv_version.startswith("v1"):
+        # Keep Qwen tokenizer handling scoped to v1 only.
         if is_qwen_family_tokenizer(tokenizer):
             return preprocess_qwen_chat(sources, tokenizer, has_image=has_image)
         return preprocess_v1(sources, tokenizer, has_image=has_image)
-    if conversation_lib.default_conversation.version == "mpt":
+    if conv_version == "mpt":
         return preprocess_mpt(sources, tokenizer, has_image=has_image)
+    if sep_style == conversation_lib.SeparatorStyle.PLAIN:
+        return preprocess_plain(sources, tokenizer)
     # add end signal and concatenate together
     conversations = []
     for source in sources:

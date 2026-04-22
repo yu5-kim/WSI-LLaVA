@@ -5,11 +5,11 @@ import json
 from tqdm import tqdm
 import shortuuid
 
-from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
-from llava.conversation import conv_templates, SeparatorStyle
+from llava.constants import IMAGE_TOKEN_INDEX
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
 from llava.mm_utils import tokenizer_image_token, process_images, get_model_name_from_path
+from llava.eval.qwen_eval_utils import build_prompt, postprocess_output
 
 from PIL import Image
 import math
@@ -50,23 +50,17 @@ def eval_model(args):
             image_tensor = process_images([image], image_processor, model.config)[0]
             images = image_tensor.unsqueeze(0).half().cuda()
             image_sizes = [image.size]
-            if getattr(model.config, 'mm_use_im_start_end', False):
-                qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
-            else:
-                qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
             cur_prompt = '<image>' + '\n' + cur_prompt
         else:
             images = None
             image_sizes = None
 
+        prompt_base = qs
         if args.single_pred_prompt:
-            qs = qs + '\n' + "Answer with the option's letter from the given choices directly."
+            prompt_base = prompt_base + '\n' + "Answer with the option's letter from the given choices directly."
             cur_prompt = cur_prompt + '\n' + "Answer with the option's letter from the given choices directly."
 
-        conv = conv_templates[args.conv_mode].copy()
-        conv.append_message(conv.roles[0], qs)
-        conv.append_message(conv.roles[1], None)
-        prompt = conv.get_prompt()
+        prompt, qwen_mode = build_prompt(prompt_base, model, model_name, tokenizer, args.conv_mode)
 
         input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
 
@@ -81,7 +75,9 @@ def eval_model(args):
                 use_cache=True,
             )
 
-        outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
+        generated_ids = output_ids[:, input_ids.shape[1]:]
+        outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        outputs = postprocess_output(outputs, qwen_mode=qwen_mode)
 
         ans_id = shortuuid.uuid()
         ans_file.write(json.dumps({"question_id": idx,

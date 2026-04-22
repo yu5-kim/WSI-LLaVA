@@ -87,6 +87,12 @@ def trim_generated_answer(text):
     return "\n".join(cleaned_lines).strip()
 
 
+def postprocess_generated_text(text: str, qwen_mode: bool) -> str:
+    if qwen_mode:
+        text = re.sub(r"^\s*(assistant|ASSISTANT|Assistant)\s*:\s*", "", text or "")
+    return trim_generated_answer((text or "").strip())
+
+
 def is_qwen_family(model_name: str, tokenizer) -> bool:
     lowered = (model_name or "").lower()
     if any(k in lowered for k in ("qwen3", "qwen2", "qwen")):
@@ -249,9 +255,7 @@ def eval_model(args):
 
         generated_ids = output_ids[:, input_ids.shape[1]:]
         outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
-        if qwen_mode:
-            outputs = re.sub(r"^\s*(assistant|ASSISTANT|Assistant)\s*:\s*", "", outputs)
-        outputs = trim_generated_answer(outputs)
+        outputs = postprocess_generated_text(outputs, qwen_mode=qwen_mode)
 
         ans_id = shortuuid.uuid()
         ans_file.write(json.dumps({

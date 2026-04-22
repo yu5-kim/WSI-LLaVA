@@ -2,6 +2,7 @@ import argparse
 import torch
 import os
 import json
+import re
 from tqdm import tqdm
 import shortuuid
 
@@ -29,26 +30,37 @@ def get_chunk(lst, n, k):
 
 # Custom dataset class
 class CustomDataset(Dataset):
-    def __init__(self, questions, image_folder, tokenizer, image_processor, model_config):
+    def __init__(self, questions, image_folder, tokenizer, image_processor, model_config, conv_mode, qwen_mode=False):
         self.questions = questions
         self.image_folder = image_folder
         self.tokenizer = tokenizer
         self.image_processor = image_processor
         self.model_config = model_config
+        self.conv_mode = conv_mode
+        self.qwen_mode = qwen_mode
 
     def __getitem__(self, index):
         line = self.questions[index]
         image_file = line["image"]
         qs = line["text"]
-        if self.model_config.mm_use_im_start_end:
-            qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
+        if self.qwen_mode and hasattr(self.tokenizer, "apply_chat_template"):
+            user_content = f"{DEFAULT_IMAGE_TOKEN}\n{qs}"
+            messages = [{"role": "user", "content": user_content}]
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
         else:
-            qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
+            if self.model_config.mm_use_im_start_end:
+                qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
+            else:
+                qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
 
-        conv = conv_templates[args.conv_mode].copy()
-        conv.append_message(conv.roles[0], qs)
-        conv.append_message(conv.roles[1], None)
-        prompt = conv.get_prompt()
+            conv = conv_templates[self.conv_mode].copy()
+            conv.append_message(conv.roles[0], qs)
+            conv.append_message(conv.roles[1], None)
+            prompt = conv.get_prompt()
 
         image = Image.open(os.path.join(self.image_folder, image_file)).convert('RGB')
         image_tensor = process_images([image], self.image_processor, self.model_config)[0]
@@ -69,11 +81,49 @@ def collate_fn(batch):
 
 
 # DataLoader
-def create_data_loader(questions, image_folder, tokenizer, image_processor, model_config, batch_size=1, num_workers=4):
+def create_data_loader(questions, image_folder, tokenizer, image_processor, model_config, conv_mode, qwen_mode=False, batch_size=1, num_workers=4):
     assert batch_size == 1, "batch_size must be 1"
-    dataset = CustomDataset(questions, image_folder, tokenizer, image_processor, model_config)
+    dataset = CustomDataset(questions, image_folder, tokenizer, image_processor, model_config, conv_mode, qwen_mode=qwen_mode)
     data_loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False, collate_fn=collate_fn)
     return data_loader
+
+
+def trim_generated_answer(text):
+    if not text:
+        return text
+
+    stop_markers = [
+        "\nUSER:",
+        "\nASSISTANT:",
+        "\nHuman:",
+        "\nQuestion:",
+        "\nQUESTION:",
+        "\nTASK:",
+        "\nASK:",
+        "\nQ:",
+    ]
+    cut_pos = len(text)
+    for marker in stop_markers:
+        pos = text.find(marker)
+        if pos != -1:
+            cut_pos = min(cut_pos, pos)
+    text = text[:cut_pos].strip()
+    return text
+
+
+def is_qwen_family(model_name: str, tokenizer) -> bool:
+    lowered = (model_name or "").lower()
+    if any(k in lowered for k in ("qwen3", "qwen2", "qwen")):
+        return True
+    tok_name = str(getattr(tokenizer, "name_or_path", "")).lower()
+    tok_class = tokenizer.__class__.__name__.lower()
+    return "qwen" in tok_name or "qwen" in tok_class
+
+
+def postprocess_generated_text(text: str, qwen_mode: bool) -> str:
+    if qwen_mode:
+        text = re.sub(r"^\s*(assistant|ASSISTANT|Assistant)\s*:\s*", "", text or "")
+    return trim_generated_answer((text or "").strip())
 
 
 def eval_model(args):
@@ -93,7 +143,16 @@ def eval_model(args):
         args.conv_mode = args.conv_mode + '_mmtag'
         print(f'It seems that this is a plain model, but it is not using a mmtag prompt, auto switching to {args.conv_mode}.')
 
-    data_loader = create_data_loader(questions, args.image_folder, tokenizer, image_processor, model.config)
+    qwen_mode = is_qwen_family(model_name, tokenizer)
+    data_loader = create_data_loader(
+        questions,
+        args.image_folder,
+        tokenizer,
+        image_processor,
+        model.config,
+        args.conv_mode,
+        qwen_mode=qwen_mode,
+    )
 
     for (input_ids, image_tensor, image_sizes), line in tqdm(zip(data_loader, questions), total=len(questions)):
         idx = line["question_id"]
@@ -115,7 +174,9 @@ def eval_model(args):
                 max_new_tokens=args.max_new_tokens,
                 use_cache=True)
 
-        outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
+        generated_ids = output_ids[:, input_ids.shape[1]:]
+        outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        outputs = postprocess_generated_text(outputs, qwen_mode=qwen_mode)
 
         ans_id = shortuuid.uuid()
         ans_file.write(json.dumps({"question_id": idx,

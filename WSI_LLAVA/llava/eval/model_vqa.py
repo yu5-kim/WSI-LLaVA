@@ -8,7 +8,12 @@ from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_S
 from llava.conversation import conv_templates
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
-from llava.mm_utils import tokenizer_image_token, get_model_name_from_path, KeywordsStoppingCriteria
+from llava.mm_utils import (
+    tokenizer_image_token,
+    get_model_name_from_path,
+    KeywordsStoppingCriteria,
+    slice_generated_tokens,
+)
 from PIL import Image
 import math
 
@@ -183,8 +188,9 @@ def eval_model(args):
                 stopping_criteria=stopping_criteria,
             )
 
-        generated_ids = output_ids[:, input_ids.shape[1]:]
-        outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        generated_ids = slice_generated_tokens(output_ids, input_ids)
+        generated_ids_for_decode = [generated_ids[i] for i in range(generated_ids.shape[0])]
+        outputs = tokenizer.batch_decode(generated_ids_for_decode, skip_special_tokens=True)[0].strip()
         outputs = trim_generated_answer(outputs)
 
         ans_id = shortuuid.uuid()

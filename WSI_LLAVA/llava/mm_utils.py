@@ -219,6 +219,16 @@ def tokenizer_image_token(
     return input_ids
 
 
+def slice_generated_tokens(output_ids: torch.LongTensor, input_ids: torch.LongTensor) -> torch.LongTensor:
+    """Slice generated tokens by prompt token length only. Never trim by decoded string length."""
+    prompt_len = input_ids.shape[1]
+    if output_ids.shape[1] < prompt_len:
+        raise ValueError(
+            f"output_ids sequence length ({output_ids.shape[1]}) must be >= prompt_len ({prompt_len})."
+        )
+    return output_ids[:, prompt_len:]
+
+
 def get_model_name_from_path(model_path):
     model_path = model_path.strip("/")
     model_paths = model_path.split("/")

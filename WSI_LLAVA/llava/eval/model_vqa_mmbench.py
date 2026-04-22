@@ -6,13 +6,16 @@ import pandas as pd
 from tqdm import tqdm
 import shortuuid
 
-from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
-from llava.conversation import conv_templates, SeparatorStyle
+from llava.constants import IMAGE_TOKEN_INDEX
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
-from llava.mm_utils import tokenizer_image_token, process_images, load_image_from_base64, get_model_name_from_path
+from llava.mm_utils import tokenizer_image_token, process_images, load_image_from_base64, get_model_name_from_path, KeywordsStoppingCriteria
+from llava.eval.prompt_utils import (
+    build_prompt_and_stop_words,
+    postprocess_generated_text,
+    resolve_generation_eos_and_pad,
+)
 
-from PIL import Image
 import math
 
 
@@ -21,7 +24,7 @@ all_options = ['A', 'B', 'C', 'D']
 
 def split_list(lst, n):
     """Split a list into n (roughly) equal-sized chunks"""
-    chunk_size = math.ceil(len(lst) / n)  # integer division
+    chunk_size = math.ceil(len(lst) / n)
     return [lst[i:i+chunk_size] for i in range(0, len(lst), chunk_size)]
 
 
@@ -41,6 +44,7 @@ def is_none(value):
         return True
     return False
 
+
 def get_options(row, options):
     parsed_options = []
     for option in options:
@@ -52,7 +56,6 @@ def get_options(row, options):
 
 
 def eval_model(args):
-    # Model
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
@@ -68,14 +71,13 @@ def eval_model(args):
         args.conv_mode = args.conv_mode + '_mmtag'
         print(f'It seems that this is a plain model, but it is not using a mmtag prompt, auto switching to {args.conv_mode}.')
 
+    eos_token_id, pad_token_id = resolve_generation_eos_and_pad(model, tokenizer)
+
     for index, row in tqdm(questions.iterrows(), total=len(questions)):
         options = get_options(row, all_options)
         cur_option_char = all_options[:len(options)]
 
-        if args.all_rounds:
-            num_rounds = len(options)
-        else:
-            num_rounds = 1
+        num_rounds = len(options) if args.all_rounds else 1
 
         for round_idx in range(num_rounds):
             idx = row['index']
@@ -86,24 +88,19 @@ def eval_model(args):
                 question = hint + '\n' + question
             for option_char, option in zip(all_options[:len(options)], options):
                 question = question + '\n' + option_char + '. ' + option
-            qs = cur_prompt = question
-            if model.config.mm_use_im_start_end:
-                qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
-            else:
-                qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
 
+            cur_prompt = question
             if args.single_pred_prompt:
                 if args.lang == 'cn':
-                    qs = qs + '\n' + "请直接回答选项字母。"
+                    cur_prompt = cur_prompt + '\n' + "请直接回答选项字母。"
                 else:
-                    qs = qs + '\n' + "Answer with the option's letter from the given choices directly."
+                    cur_prompt = cur_prompt + '\n' + "Answer with the option's letter from the given choices directly."
 
-            conv = conv_templates[args.conv_mode].copy()
-            conv.append_message(conv.roles[0], qs)
-            conv.append_message(conv.roles[1], None)
-            prompt = conv.get_prompt()
-
+            prompt, stop_words, qwen_mode = build_prompt_and_stop_words(
+                cur_prompt, model, model_name, tokenizer, args.conv_mode
+            )
             input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
+            stopping_criteria = [KeywordsStoppingCriteria(list(dict.fromkeys([w for w in stop_words if w])), tokenizer, input_ids)]
 
             image_tensor = process_images([image], image_processor, model.config)[0]
 
@@ -116,11 +113,16 @@ def eval_model(args):
                     temperature=args.temperature,
                     top_p=args.top_p,
                     num_beams=args.num_beams,
-                    # no_repeat_ngram_size=3,
                     max_new_tokens=1024,
-                    use_cache=True)
+                    use_cache=True,
+                    eos_token_id=eos_token_id,
+                    pad_token_id=pad_token_id,
+                    stopping_criteria=stopping_criteria,
+                )
 
-            outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
+            generated_ids = output_ids[:, input_ids.shape[1]:]
+            outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            outputs = postprocess_generated_text(outputs, qwen_mode)
 
             ans_id = shortuuid.uuid()
             ans_file.write(json.dumps({"question_id": idx,
@@ -134,10 +136,10 @@ def eval_model(args):
                                     "metadata": {}}) + "\n")
             ans_file.flush()
 
-            # rotate options
             options = options[1:] + options[:1]
             cur_option_char = cur_option_char[1:] + cur_option_char[:1]
     ans_file.close()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

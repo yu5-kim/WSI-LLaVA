@@ -2,14 +2,17 @@ import argparse
 import torch
 import os
 import json
-import re
 from tqdm import tqdm
 import shortuuid
-from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
-from llava.conversation import conv_templates
+from llava.constants import IMAGE_TOKEN_INDEX
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
 from llava.mm_utils import tokenizer_image_token, get_model_name_from_path, KeywordsStoppingCriteria
+from llava.eval.prompt_utils import (
+    build_prompt_and_stop_words,
+    postprocess_generated_text,
+    resolve_generation_eos_and_pad,
+)
 from PIL import Image
 import math
 
@@ -49,121 +52,6 @@ def sample_patch_features(image, patch_sample_ratio):
     return image.index_select(0, sampled_indices)
 
 
-def trim_generated_answer(text):
-    """Trim leaked multi-turn prefixes and noisy numeric tails."""
-    if not text:
-        return text
-
-    stop_markers = [
-        "\nUSER:",
-        "\nASSISTANT:",
-        "\nHuman:",
-        "\nQuestion:",
-        "\nQUESTION:",
-        "\nTASK:",
-        "\nASK:",
-        "\nQ:",
-    ]
-    cut_pos = len(text)
-    for marker in stop_markers:
-        pos = text.find(marker)
-        if pos != -1:
-            cut_pos = min(cut_pos, pos)
-    text = text[:cut_pos].strip()
-
-    cleaned_lines = []
-    prev = None
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        numeric_like = sum(ch.isdigit() for ch in line) > max(16, int(0.7 * len(line)))
-        if numeric_like:
-            break
-        if line == prev:
-            continue
-        cleaned_lines.append(line)
-        prev = line
-    return "\n".join(cleaned_lines).strip()
-
-
-def is_qwen_family(model_name: str, tokenizer) -> bool:
-    lowered = (model_name or "").lower()
-    if any(k in lowered for k in ("qwen3", "qwen2", "qwen")):
-        return True
-    tok_name = str(getattr(tokenizer, "name_or_path", "")).lower()
-    tok_class = tokenizer.__class__.__name__.lower()
-    return "qwen" in tok_name or "qwen" in tok_class
-
-
-def build_prompt_and_stop_words(cur_prompt, model, model_name, tokenizer, args):
-    qwen_mode = is_qwen_family(model_name, tokenizer) and hasattr(tokenizer, "apply_chat_template")
-    if qwen_mode:
-        user_content = f"{DEFAULT_IMAGE_TOKEN}\n{cur_prompt}"
-        messages = [{"role": "user", "content": user_content}]
-        prompt = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-        stop_words = [
-            "\nUSER:",
-            "\nASSISTANT:",
-            "\nHuman:",
-            "\nQUESTION:",
-            "\nTASK:",
-            "USER:",
-            "ASSISTANT:",
-        ]
-        return prompt, stop_words, qwen_mode
-
-    if model.config.mm_use_im_start_end:
-        qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + cur_prompt
-    else:
-        qs = DEFAULT_IMAGE_TOKEN + '\n' + cur_prompt
-
-    conv = conv_templates[args.conv_mode].copy()
-    conv.append_message(conv.roles[0], qs)
-    conv.append_message(conv.roles[1], None)
-    prompt = conv.get_prompt()
-
-    stop_words = []
-    if conv.sep2:
-        stop_words.append(conv.sep2)
-    stop_words.extend([
-        f"{conv.roles[0]}:",
-        "\nUSER:",
-        "\nASSISTANT:",
-        "\nHuman:",
-        "\nQUESTION:",
-        "\nTASK:",
-    ])
-    return prompt, stop_words, qwen_mode
-
-
-def resolve_generation_eos_and_pad(model, tokenizer):
-    eos_ids = []
-    generation_eos = getattr(getattr(model, "generation_config", None), "eos_token_id", None)
-    if isinstance(generation_eos, (list, tuple)):
-        eos_ids.extend([int(x) for x in generation_eos if x is not None])
-    elif generation_eos is not None:
-        eos_ids.append(int(generation_eos))
-    if tokenizer.eos_token_id is not None:
-        eos_ids.append(int(tokenizer.eos_token_id))
-    eos_ids = list(dict.fromkeys(eos_ids))
-
-    if not eos_ids:
-        eos_token_id = None
-    elif len(eos_ids) == 1:
-        eos_token_id = eos_ids[0]
-    else:
-        eos_token_id = eos_ids
-
-    pad_token_id = tokenizer.pad_token_id
-    if pad_token_id is None and eos_ids:
-        pad_token_id = eos_ids[0]
-
-    return eos_token_id, pad_token_id
 
 
 def eval_model(args):
@@ -211,7 +99,7 @@ def eval_model(args):
 
         cur_prompt = qs
         prompt, stop_words, qwen_mode = build_prompt_and_stop_words(
-            cur_prompt, model, model_name, tokenizer, args
+            cur_prompt, model, model_name, tokenizer, args.conv_mode
         )
 
         input_ids = tokenizer_image_token(
@@ -248,10 +136,8 @@ def eval_model(args):
             )
 
         generated_ids = output_ids[:, input_ids.shape[1]:]
-        outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
-        if qwen_mode:
-            outputs = re.sub(r"^\s*(assistant|ASSISTANT|Assistant)\s*:\s*", "", outputs)
-        outputs = trim_generated_answer(outputs)
+        outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        outputs = postprocess_generated_text(outputs, qwen_mode)
 
         ans_id = shortuuid.uuid()
         ans_file.write(json.dumps({

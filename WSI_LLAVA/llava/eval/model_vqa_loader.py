@@ -5,11 +5,20 @@ import json
 from tqdm import tqdm
 import shortuuid
 
-from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
-from llava.conversation import conv_templates, SeparatorStyle
+from llava.constants import IMAGE_TOKEN_INDEX
 from llava.model.builder import load_pretrained_model
 from llava.utils import disable_torch_init
-from llava.mm_utils import tokenizer_image_token, process_images, get_model_name_from_path
+from llava.mm_utils import (
+    tokenizer_image_token,
+    process_images,
+    get_model_name_from_path,
+    KeywordsStoppingCriteria,
+)
+from llava.eval.prompt_utils import (
+    build_prompt_and_stop_words,
+    postprocess_generated_text,
+    resolve_generation_eos_and_pad,
+)
 from torch.utils.data import Dataset, DataLoader
 
 from PIL import Image
@@ -18,7 +27,7 @@ import math
 
 def split_list(lst, n):
     """Split a list into n (roughly) equal-sized chunks"""
-    chunk_size = math.ceil(len(lst) / n)  # integer division
+    chunk_size = math.ceil(len(lst) / n)
     return [lst[i:i+chunk_size] for i in range(0, len(lst), chunk_size)]
 
 
@@ -27,57 +36,49 @@ def get_chunk(lst, n, k):
     return chunks[k]
 
 
-# Custom dataset class
 class CustomDataset(Dataset):
-    def __init__(self, questions, image_folder, tokenizer, image_processor, model_config):
+    def __init__(self, questions, image_folder, tokenizer, image_processor, model, model_name, conv_mode):
         self.questions = questions
         self.image_folder = image_folder
         self.tokenizer = tokenizer
         self.image_processor = image_processor
-        self.model_config = model_config
+        self.model = model
+        self.model_name = model_name
+        self.conv_mode = conv_mode
 
     def __getitem__(self, index):
         line = self.questions[index]
         image_file = line["image"]
-        qs = line["text"]
-        if self.model_config.mm_use_im_start_end:
-            qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
-        else:
-            qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
+        cur_prompt = line["text"]
 
-        conv = conv_templates[args.conv_mode].copy()
-        conv.append_message(conv.roles[0], qs)
-        conv.append_message(conv.roles[1], None)
-        prompt = conv.get_prompt()
+        prompt, stop_words, qwen_mode = build_prompt_and_stop_words(
+            cur_prompt, self.model, self.model_name, self.tokenizer, self.conv_mode
+        )
 
         image = Image.open(os.path.join(self.image_folder, image_file)).convert('RGB')
-        image_tensor = process_images([image], self.image_processor, self.model_config)[0]
+        image_tensor = process_images([image], self.image_processor, self.model.config)[0]
 
         input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
-
-        return input_ids, image_tensor, image.size
+        return input_ids, image_tensor, image.size, stop_words, qwen_mode
 
     def __len__(self):
         return len(self.questions)
 
 
 def collate_fn(batch):
-    input_ids, image_tensors, image_sizes = zip(*batch)
+    input_ids, image_tensors, image_sizes, stop_words, qwen_modes = zip(*batch)
     input_ids = torch.stack(input_ids, dim=0)
     image_tensors = torch.stack(image_tensors, dim=0)
-    return input_ids, image_tensors, image_sizes
+    return input_ids, image_tensors, image_sizes, stop_words, qwen_modes
 
 
-# DataLoader
-def create_data_loader(questions, image_folder, tokenizer, image_processor, model_config, batch_size=1, num_workers=4):
+def create_data_loader(questions, image_folder, tokenizer, image_processor, model, model_name, conv_mode, batch_size=1, num_workers=4):
     assert batch_size == 1, "batch_size must be 1"
-    dataset = CustomDataset(questions, image_folder, tokenizer, image_processor, model_config)
-    data_loader = DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False, collate_fn=collate_fn)
-    return data_loader
+    dataset = CustomDataset(questions, image_folder, tokenizer, image_processor, model, model_name, conv_mode)
+    return DataLoader(dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False, collate_fn=collate_fn)
 
 
 def eval_model(args):
-    # Model
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
@@ -93,14 +94,25 @@ def eval_model(args):
         args.conv_mode = args.conv_mode + '_mmtag'
         print(f'It seems that this is a plain model, but it is not using a mmtag prompt, auto switching to {args.conv_mode}.')
 
-    data_loader = create_data_loader(questions, args.image_folder, tokenizer, image_processor, model.config)
+    data_loader = create_data_loader(
+        questions,
+        args.image_folder,
+        tokenizer,
+        image_processor,
+        model,
+        model_name,
+        args.conv_mode,
+    )
+    eos_token_id, pad_token_id = resolve_generation_eos_and_pad(model, tokenizer)
 
-    for (input_ids, image_tensor, image_sizes), line in tqdm(zip(data_loader, questions), total=len(questions)):
+    for (input_ids, image_tensor, image_sizes, stop_words, qwen_modes), line in tqdm(zip(data_loader, questions), total=len(questions)):
         idx = line["question_id"]
         cur_prompt = line["text"]
 
         input_ids = input_ids.to(device='cuda', non_blocking=True)
         attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=input_ids.device)
+        stop_words = list(dict.fromkeys([w for w in stop_words[0] if w]))
+        stopping_criteria = [KeywordsStoppingCriteria(stop_words, tokenizer, input_ids)]
 
         with torch.inference_mode():
             output_ids = model.generate(
@@ -113,9 +125,15 @@ def eval_model(args):
                 top_p=args.top_p,
                 num_beams=args.num_beams,
                 max_new_tokens=args.max_new_tokens,
-                use_cache=True)
+                use_cache=True,
+                eos_token_id=eos_token_id,
+                pad_token_id=pad_token_id,
+                stopping_criteria=stopping_criteria,
+            )
 
-        outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0].strip()
+        generated_ids = output_ids[:, input_ids.shape[1]:]
+        outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        outputs = postprocess_generated_text(outputs, qwen_modes[0])
 
         ans_id = shortuuid.uuid()
         ans_file.write(json.dumps({"question_id": idx,
@@ -124,8 +142,8 @@ def eval_model(args):
                                    "answer_id": ans_id,
                                    "model_id": model_name,
                                    "metadata": {}}) + "\n")
-        # ans_file.flush()
     ans_file.close()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

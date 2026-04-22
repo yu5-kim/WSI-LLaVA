@@ -200,6 +200,14 @@ def eval_model(args):
         print(f"Creating new results file: {answers_file}")
 
     debug_count = 0
+    raw_debug_count = 0
+    raw_debug_file = None
+    if args.raw_output_debug_file:
+        raw_debug_path = os.path.expanduser(args.raw_output_debug_file)
+        raw_debug_dir = os.path.dirname(raw_debug_path)
+        if raw_debug_dir:
+            os.makedirs(raw_debug_dir, exist_ok=True)
+        raw_debug_file = open(raw_debug_path, "a")
 
     # ===== 3. Iterate over question list =====
     for line in tqdm(questions, desc="Inference"):
@@ -263,6 +271,32 @@ def eval_model(args):
         if args.prompt_debug_limit > 0 and debug_count < args.prompt_debug_limit:
             print(f"[Eval Output Debug {debug_count + 1}/{args.prompt_debug_limit}] question_id={idx}\n{outputs}\n")
             debug_count += 1
+        if args.raw_output_debug_limit > 0 and raw_debug_count < args.raw_output_debug_limit:
+            full_text = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
+            generated_text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+            full_text_with_special = tokenizer.batch_decode(output_ids, skip_special_tokens=False)[0]
+            debug_payload = {
+                "question_id": idx,
+                "qwen_mode": qwen_mode,
+                "input_token_len": int(input_ids.shape[1]),
+                "output_token_len": int(output_ids.shape[1]),
+                "generated_token_len": int(generated_ids.shape[1]),
+                "input_head_ids": input_ids[0][:16].tolist(),
+                "output_head_ids": output_ids[0][:16].tolist(),
+                "generated_head_ids": generated_ids[0][:16].tolist(),
+                "decoded_full_skip_special": full_text,
+                "decoded_generated_skip_special": generated_text,
+                "decoded_full_with_special": full_text_with_special,
+            }
+            print(
+                f"[Eval Raw Debug {raw_debug_count + 1}/{args.raw_output_debug_limit}] "
+                f"question_id={idx}, input_len={debug_payload['input_token_len']}, "
+                f"output_len={debug_payload['output_token_len']}, generated_len={debug_payload['generated_token_len']}"
+            )
+            if raw_debug_file is not None:
+                raw_debug_file.write(json.dumps(debug_payload, ensure_ascii=False) + "\n")
+                raw_debug_file.flush()
+            raw_debug_count += 1
 
         ans_id = shortuuid.uuid()
         ans_file.write(json.dumps({
@@ -276,6 +310,8 @@ def eval_model(args):
         ans_file.flush()
 
     ans_file.close()
+    if raw_debug_file is not None:
+        raw_debug_file.close()
     print("All samples inference completed.")
 
 
@@ -299,6 +335,10 @@ if __name__ == "__main__":
                              "Use 1.0 to keep all patches.")
     parser.add_argument("--prompt-debug-limit", type=int, default=0,
                         help="Print up to N eval prompts/outputs for debugging.")
+    parser.add_argument("--raw-output-debug-limit", type=int, default=0,
+                        help="Print/write up to N raw generation debug payloads.")
+    parser.add_argument("--raw-output-debug-file", type=str, default=None,
+                        help="Optional JSONL file path to save raw generation debug payloads.")
     args = parser.parse_args()
 
     eval_model(args)

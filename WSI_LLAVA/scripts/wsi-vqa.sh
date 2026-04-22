@@ -47,9 +47,15 @@ ANSWERS_FILE="WSI-Bench/Results/WSI-Bench-Report-only-Qwen3_4B_Instruct_2507_lor
 # 한 번만 쓸 비율 (기본 1.0 = 전체 패치). 예: PATCH_SAMPLE_RATIO=0.05 ./WSI_LLAVA/scripts/wsi-vqa.sh
 PATCH_SAMPLE_RATIO="${PATCH_SAMPLE_RATIO:-1.0}"
 PROMPT_DEBUG_LIMIT="${PROMPT_DEBUG_LIMIT:-0}"
+RAW_OUTPUT_DEBUG_LIMIT="${RAW_OUTPUT_DEBUG_LIMIT:-0}"
+RAW_OUTPUT_DEBUG_FILE="${RAW_OUTPUT_DEBUG_FILE:-}"
 
 echo "patch_sample_ratio=${PATCH_SAMPLE_RATIO}"
 echo "prompt_debug_limit=${PROMPT_DEBUG_LIMIT}"
+echo "raw_output_debug_limit=${RAW_OUTPUT_DEBUG_LIMIT}"
+if [[ -n "${RAW_OUTPUT_DEBUG_FILE}" ]]; then
+  echo "raw_output_debug_file=${RAW_OUTPUT_DEBUG_FILE}"
+fi
 echo "answers: ${ANSWERS_FILE}"
 
 cd "${REPO_ROOT}" || exit 1
@@ -66,7 +72,9 @@ if [[ "${SKIP_VQA:-0}" != "1" ]]; then
         --chunk-idx 0 \
         --temperature 0 \
         --patch-sample-ratio "${PATCH_SAMPLE_RATIO}" \
-        --prompt-debug-limit "${PROMPT_DEBUG_LIMIT}" || VQA_EXIT=$?
+        --prompt-debug-limit "${PROMPT_DEBUG_LIMIT}" \
+        --raw-output-debug-limit "${RAW_OUTPUT_DEBUG_LIMIT}" \
+        --raw-output-debug-file "${RAW_OUTPUT_DEBUG_FILE}" || VQA_EXIT=$?
 else
     echo "SKIP_VQA=1: model_vqa.py 건너뜀 (기존 ANSWERS_FILE로 메트릭만 계산)"
 fi

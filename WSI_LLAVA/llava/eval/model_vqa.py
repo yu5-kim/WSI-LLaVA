@@ -2,6 +2,7 @@ import argparse
 import torch
 import os
 import json
+import re
 from tqdm import tqdm
 import shortuuid
 from llava.constants import IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
@@ -86,6 +87,85 @@ def trim_generated_answer(text):
     return "\n".join(cleaned_lines).strip()
 
 
+def is_qwen_family(model_name: str, tokenizer) -> bool:
+    lowered = (model_name or "").lower()
+    if any(k in lowered for k in ("qwen3", "qwen2", "qwen")):
+        return True
+    tok_name = str(getattr(tokenizer, "name_or_path", "")).lower()
+    tok_class = tokenizer.__class__.__name__.lower()
+    return "qwen" in tok_name or "qwen" in tok_class
+
+
+def build_prompt_and_stop_words(cur_prompt, model, model_name, tokenizer, args):
+    qwen_mode = is_qwen_family(model_name, tokenizer) and hasattr(tokenizer, "apply_chat_template")
+    if qwen_mode:
+        user_content = f"{DEFAULT_IMAGE_TOKEN}\n{cur_prompt}"
+        messages = [{"role": "user", "content": user_content}]
+        prompt = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        stop_words = [
+            "\nUSER:",
+            "\nASSISTANT:",
+            "\nHuman:",
+            "\nQUESTION:",
+            "\nTASK:",
+            "USER:",
+            "ASSISTANT:",
+        ]
+        return prompt, stop_words, qwen_mode
+
+    if model.config.mm_use_im_start_end:
+        qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + cur_prompt
+    else:
+        qs = DEFAULT_IMAGE_TOKEN + '\n' + cur_prompt
+
+    conv = conv_templates[args.conv_mode].copy()
+    conv.append_message(conv.roles[0], qs)
+    conv.append_message(conv.roles[1], None)
+    prompt = conv.get_prompt()
+
+    stop_words = []
+    if conv.sep2:
+        stop_words.append(conv.sep2)
+    stop_words.extend([
+        f"{conv.roles[0]}:",
+        "\nUSER:",
+        "\nASSISTANT:",
+        "\nHuman:",
+        "\nQUESTION:",
+        "\nTASK:",
+    ])
+    return prompt, stop_words, qwen_mode
+
+
+def resolve_generation_eos_and_pad(model, tokenizer):
+    eos_ids = []
+    generation_eos = getattr(getattr(model, "generation_config", None), "eos_token_id", None)
+    if isinstance(generation_eos, (list, tuple)):
+        eos_ids.extend([int(x) for x in generation_eos if x is not None])
+    elif generation_eos is not None:
+        eos_ids.append(int(generation_eos))
+    if tokenizer.eos_token_id is not None:
+        eos_ids.append(int(tokenizer.eos_token_id))
+    eos_ids = list(dict.fromkeys(eos_ids))
+
+    if not eos_ids:
+        eos_token_id = None
+    elif len(eos_ids) == 1:
+        eos_token_id = eos_ids[0]
+    else:
+        eos_token_id = eos_ids
+
+    pad_token_id = tokenizer.pad_token_id
+    if pad_token_id is None and eos_ids:
+        pad_token_id = eos_ids[0]
+
+    return eos_token_id, pad_token_id
+
+
 def eval_model(args):
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
@@ -130,15 +210,9 @@ def eval_model(args):
         Tanswer = line["T-answer"]
 
         cur_prompt = qs
-        if model.config.mm_use_im_start_end:
-            qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + qs
-        else:
-            qs = DEFAULT_IMAGE_TOKEN + '\n' + qs
-
-        conv = conv_templates[args.conv_mode].copy()
-        conv.append_message(conv.roles[0], qs)
-        conv.append_message(conv.roles[1], None)
-        prompt = conv.get_prompt()
+        prompt, stop_words, qwen_mode = build_prompt_and_stop_words(
+            cur_prompt, model, model_name, tokenizer, args
+        )
 
         input_ids = tokenizer_image_token(
             prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt'
@@ -149,20 +223,10 @@ def eval_model(args):
         image = load_image(image_path)
         image = sample_patch_features(image, args.patch_sample_ratio)
         image_tensor = image.to(model.device, dtype=torch.float16)
-        stop_words = []
-        if conv.sep2:
-            stop_words.append(conv.sep2)
-        stop_words.extend([
-            f"{conv.roles[0]}:",
-            "\nUSER:",
-            "\nASSISTANT:",
-            "\nHuman:",
-            "\nQUESTION:",
-            "\nTASK:",
-        ])
         # preserve order while removing duplicates/empties
         stop_words = list(dict.fromkeys([w for w in stop_words if w]))
         stopping_criteria = [KeywordsStoppingCriteria(stop_words, tokenizer, input_ids)]
+        eos_token_id, pad_token_id = resolve_generation_eos_and_pad(model, tokenizer)
 
         with torch.inference_mode():
             output_ids = model.generate(
@@ -178,13 +242,15 @@ def eval_model(args):
                 repetition_penalty=args.repetition_penalty,
                 max_new_tokens=args.max_new_tokens,
                 use_cache=True,
-                eos_token_id=tokenizer.eos_token_id,
-                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=eos_token_id,
+                pad_token_id=pad_token_id,
                 stopping_criteria=stopping_criteria,
             )
 
         generated_ids = output_ids[:, input_ids.shape[1]:]
         outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        if qwen_mode:
+            outputs = re.sub(r"^\s*(assistant|ASSISTANT|Assistant)\s*:\s*", "", outputs)
         outputs = trim_generated_answer(outputs)
 
         ans_id = shortuuid.uuid()

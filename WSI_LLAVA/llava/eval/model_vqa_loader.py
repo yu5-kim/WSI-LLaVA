@@ -100,10 +100,12 @@ def eval_model(args):
         cur_prompt = line["text"]
 
         input_ids = input_ids.to(device='cuda', non_blocking=True)
+        attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=input_ids.device)
 
         with torch.inference_mode():
             output_ids = model.generate(
                 input_ids,
+                attention_mask=attention_mask,
                 images=image_tensor.to(dtype=torch.float16, device='cuda', non_blocking=True),
                 image_sizes=image_sizes,
                 do_sample=True if args.temperature > 0 else False,

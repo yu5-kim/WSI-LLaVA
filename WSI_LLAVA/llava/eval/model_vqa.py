@@ -48,8 +48,8 @@ def sample_patch_features(image, patch_sample_ratio):
     return image.index_select(0, sampled_indices)
 
 
-def trim_generated_answer(text):
-    """Trim leaked multi-turn prefixes and noisy numeric tails."""
+def trim_after_stop_markers(text):
+    """Cut obvious leaked next-turn markers that generation stop may miss."""
     if not text:
         return text
 
@@ -68,7 +68,26 @@ def trim_generated_answer(text):
         pos = text.find(marker)
         if pos != -1:
             cut_pos = min(cut_pos, pos)
-    text = text[:cut_pos].strip()
+    return text[:cut_pos].strip()
+
+
+def minimal_output_cleanup(text, separator=None):
+    """Keep post-processing minimal: trim whitespace and optional trailing separator."""
+    if not text:
+        return text
+
+    text = text.strip()
+    if separator:
+        separator = separator.strip()
+        if separator and text.endswith(separator):
+            text = text[:-len(separator)].rstrip()
+    return text
+
+
+def aggressive_trim_generated_answer(text):
+    """Legacy aggressive cleaner kept optional for ablation/debug purposes."""
+    if not text:
+        return text
 
     cleaned_lines = []
     prev = None
@@ -149,6 +168,8 @@ def eval_model(args):
         image = load_image(image_path)
         image = sample_patch_features(image, args.patch_sample_ratio)
         image_tensor = image.to(model.device, dtype=torch.float16)
+        # Prefer preventing multi-turn leakage at generation-time (template + stop/eos),
+        # and keep text post-processing minimal/transparent.
         stop_words = []
         if conv.sep2:
             stop_words.append(conv.sep2)
@@ -184,18 +205,29 @@ def eval_model(args):
             )
 
         generated_ids = output_ids[:, input_ids.shape[1]:]
-        outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
-        outputs = trim_generated_answer(outputs)
+        raw_decoded = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        post_stop_trim = trim_after_stop_markers(raw_decoded)
+        final_output = minimal_output_cleanup(post_stop_trim, separator=conv.sep2)
+        if args.enable_aggressive_post_clean:
+            final_output = aggressive_trim_generated_answer(final_output)
+        outputs = final_output
 
         ans_id = shortuuid.uuid()
-        ans_file.write(json.dumps({
+        answer_record = {
             "question_id": idx,
             "image": image_file,
             "question": cur_prompt,
             "answer": outputs,
             "T-answer": Tanswer,
             "metadata": metadata
-        }) + "\n")
+        }
+        if args.debug_output_stages:
+            answer_record["debug_output_stages"] = {
+                "raw_decoded": raw_decoded,
+                "post_stop_trim": post_stop_trim,
+                "final_output": final_output,
+            }
+        ans_file.write(json.dumps(answer_record) + "\n")
         ans_file.flush()
 
     ans_file.close()
@@ -220,6 +252,17 @@ if __name__ == "__main__":
     parser.add_argument("--patch-sample-ratio", type=float, default=1.0,
                         help="Ratio of patch features to sample per slide during evaluation. "
                              "Use 1.0 to keep all patches.")
+    parser.add_argument(
+        "--enable-aggressive-post-clean",
+        action="store_true",
+        help="Enable legacy aggressive cleanup rules (numeric-tail/duplicate-line removal). "
+             "Disabled by default to avoid masking generation stop failures.",
+    )
+    parser.add_argument(
+        "--debug-output-stages",
+        action="store_true",
+        help="Store raw_decoded, post_stop_trim, and final_output for quality comparison.",
+    )
     args = parser.parse_args()
 
     eval_model(args)

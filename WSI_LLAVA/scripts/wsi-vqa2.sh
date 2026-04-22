@@ -1,6 +1,6 @@
 export MASTER_PORT=29501
 export PYTHONPATH=./WSI_LLAVA
-export CUDA_VISIBLE_DEVICES=6
+export CUDA_VISIBLE_DEVICES=7
 
 # 리포 루트(WSI-LLaVA)에서 실행 권장: ./WSI_LLAVA/scripts/wsi-vqa.sh
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,7 +30,7 @@ IMAGE_FOLDER=/dataset/data/slide_spatial_features/ps512/conch_v1_5_titan/TCGA_yu
 # MODEL_PATH=/dataset/personal/yu5kim/WSI-LLaVA/merged_checkpoints_1gpu/wsi_llava_lora_last_after_stage2_stage3_1e
 # MODEL_PATH=/dataset/personal/yu5kim/WSI-LLaVA/merged_checkpoints_1gpu/wsi_llava_lora_last_stage3only_1e
 
-MODEL_PATH=/dataset/personal/yu5kim/WSI-Qwen/WSI-LLaVA/merged_checkpoints_1e/wsi_llava_qwen3_4b_instruct_2507_lora_last_stage3only_3e
+MODEL_PATH=/dataset/personal/yu5kim/WSI-Qwen/WSI-LLaVA/merged_checkpoints/wsi_llava_qwen3_4b_lora_last_stage3only_3e
 
 
 
@@ -39,7 +39,7 @@ MODEL_PATH=/dataset/personal/yu5kim/WSI-Qwen/WSI-LLaVA/merged_checkpoints_1e/wsi
 # ANSWERS_FILE="WSI-Bench/WSI-Bench-Report-only-wsi_llava_lora_penultimate_stage3only_checkpoint-515.jsonl"
 # ANSWERS_FILE="WSI-Bench/WSI-Bench-Report-only-wsi_llava_lora_penultimate_stage3only_1e.jsonl"
 # ANSWERS_FILE="WSI-Bench/WSI-Bench-Report-only-1gpu-wsi_llava_lora_last_after_stage2_stage3_1e.jsonl"
-ANSWERS_FILE="WSI-Bench/Results/WSI-Bench-Report-only-Qwen3_4B_Instruct_2507_lora_last_stage3only_1e.jsonl"
+ANSWERS_FILE="WSI-Bench/Results/WSI-Bench-Report-only-Qwen3_4B_lora_last_stage3only_3e.jsonl"
 
 
 

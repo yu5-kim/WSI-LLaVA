@@ -9,7 +9,7 @@ export PYTHONPATH="$(cd "${SCRIPT_DIR}/.." && pwd)"
 #  --model-base /dataset/data/raw/WSIBench/vicuna-7b-v1.5 \
 #  --save-model-path /dataset/personal/yu5kim/WSI-LLaVA/merged_checkpoints/wsi_llava_lora_penultimate_stage3only
 
-python "${SCRIPT_DIR}/merge_lora_weights.py" \
-    --model-path /dataset/personal/yu5kim/WSI-Qwen/WSI-LLaVA/checkpoints_4gpu_3e/wsi_llava_qwen3_4b_instruct_2507_lora_last_stage3only \
-    --model-base /dataset/model/Qwen3/Qwen3-4B-Instruct-2507 \
-    --save-model-path /dataset/personal/yu5kim/WSI-Qwen/WSI-LLaVA/merged_checkpoints/wsi_llava_qwen3_4b_instruct_2507_lora_last_stage3only_3e
+CUDA_VISIBLE_DEVICES=7 python "${SCRIPT_DIR}/merge_lora_weights.py" \
+    --model-path /dataset/personal/yu5kim/WSI-Qwen/WSI-LLaVA/checkpoints_4gpu_3e_0421/wsi_llava_qwen3_8b_lora_last_stage3only \
+    --model-base /dataset/model/Qwen3/Qwen3-8B \
+    --save-model-path /dataset/personal/yu5kim/WSI-Qwen/WSI-LLaVA/merged_checkpoints/wsi_llava_qwen3_8b_lora_last_stage3only

@@ -10,6 +10,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}/WSI_LLAVA"
 export WANDB_MODE=offline
 REPORT_TO="${REPORT_TO:-wandb}"
+PROMPT_DEBUG_LIMIT="${PROMPT_DEBUG_LIMIT:-0}"
 
 IMAGE_FOLDER="/dataset/data/slide_spatial_features/ps512/conch_v1_5_titan/TCGA_yu5kim_WSI_LLaVA"
 DATA_PATH="/dataset/personal/yu5kim/WSI-LLaVA/WSI-Bench/WSI-Bench-train_filtered_llava576_paths_last.json"
@@ -27,6 +28,7 @@ MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-/dataset/model/Qwen3/Qwen3-4B-Instruct
 VISION_TOWER="${VISION_TOWER:-/dataset/data/raw/WSIBench/clip-vit-large-patch14-336}"
 
 cd "${REPO_ROOT}" || exit 1
+echo "prompt_debug_limit=${PROMPT_DEBUG_LIMIT}"
 
 deepspeed --master_port "${MASTER_PORT:-29507}" "${REPO_ROOT}/WSI_LLAVA/llava/train/train_mem.py" \
     --lora_enable True --lora_r 128 --lora_alpha 256 --mm_projector_lr 2e-5 \
@@ -63,4 +65,5 @@ deepspeed --master_port "${MASTER_PORT:-29507}" "${REPO_ROOT}/WSI_LLAVA/llava/tr
     --gradient_checkpointing True \
     --dataloader_num_workers 4 \
     --lazy_preprocess True \
+    --prompt_debug_limit "${PROMPT_DEBUG_LIMIT}" \
     --report_to "${REPORT_TO}"

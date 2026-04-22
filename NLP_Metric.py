@@ -43,7 +43,7 @@ class MetricsEvaluator:
             nltk.download('wordnet', quiet=True)
     
     @staticmethod
-    def load_data(file_path: str, gt_key: str = 'T-answer', 
+    def load_data(file_path: str, gt_key: str = 'T-answer',
                   pred_key: str = 'Output', id_key: str = 'question_id') -> Tuple[Dict, Dict]:
         """
         Load ground truth and prediction data from JSONL file.
@@ -59,23 +59,83 @@ class MetricsEvaluator:
         """
         gt_answers = {}
         pred_answers = {}
+        skipped_empty = 0
+        empty_predictions = 0
+        used_pred_fallback = 0
+        used_gt_fallback = 0
+        used_id_fallback = 0
+
+        # Common key aliases across evaluation outputs.
+        gt_aliases = ('T-answer', 't_answer', 'ground_truth', 'gt', 'answer')
+        pred_aliases = ('Output', 'output', 'prediction', 'pred', 'answer', 'response')
+        id_aliases = ('question_id', 'qid', 'id')
         
         with open(file_path, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f, 1):
                 try:
                     data = json.loads(line)
                     qid = data.get(id_key, '')
-                    gt_text = data.get(gt_key, '').strip()
-                    pred_text = data.get(pred_key, '').strip()
-                    
-                    if gt_text and pred_text:
+                    if not qid:
+                        for key in id_aliases:
+                            value = data.get(key, '')
+                            if value:
+                                qid = value
+                                used_id_fallback += 1
+                                break
+
+                    gt_text = data.get(gt_key, '')
+                    if not gt_text:
+                        for key in gt_aliases:
+                            value = data.get(key, '')
+                            if value:
+                                gt_text = value
+                                if key != gt_key:
+                                    used_gt_fallback += 1
+                                break
+
+                    pred_text = data.get(pred_key, '')
+                    if not pred_text:
+                        for key in pred_aliases:
+                            value = data.get(key, '')
+                            if value and value != gt_text:
+                                pred_text = value
+                                if key != pred_key:
+                                    used_pred_fallback += 1
+                                break
+                        # If only one answer-like field exists, allow it for prediction.
+                        if not pred_text and isinstance(data.get('answer', ''), str):
+                            pred_text = data.get('answer', '')
+                            if pred_key != 'answer':
+                                used_pred_fallback += 1
+
+                    qid = str(qid).strip()
+                    gt_text = str(gt_text).strip()
+                    pred_text = str(pred_text).strip()
+
+                    # Require id + ground truth; empty predictions are kept so the
+                    # sample count matches inference (failed generations penalize the average).
+                    if qid and gt_text:
                         gt_answers[qid] = gt_text
                         pred_answers[qid] = pred_text
+                        if not pred_text:
+                            empty_predictions += 1
+                    else:
+                        skipped_empty += 1
                     
                 except json.JSONDecodeError:
                     print(f"⚠️  Warning: Failed to parse line {line_num}, skipping...")
                     continue
         
+        print(f"📌 Loaded pairs: {len(gt_answers)} (skipped: {skipped_empty})")
+        if empty_predictions:
+            print(f"ℹ️  Empty predictions included in metrics: {empty_predictions} (counted as ~0 score)")
+        if used_id_fallback:
+            print(f"ℹ️  Used fallback ID keys for {used_id_fallback} records")
+        if used_gt_fallback:
+            print(f"ℹ️  Used fallback GT keys for {used_gt_fallback} records")
+        if used_pred_fallback:
+            print(f"ℹ️  Used fallback prediction keys for {used_pred_fallback} records")
+
         return gt_answers, pred_answers
     
     def calculate_bleu(self, reference_tokens: list, candidate_tokens: list) -> list:
@@ -253,7 +313,7 @@ def main():
     parser.add_argument(
         '--output', '-o',
         type=str,
-        help='Optional: Path to save results as JSON'
+        help='Optional: Path to save results (.json or .tsv; .tsv writes header + one value row)'
     )
     
     args = parser.parse_args()
@@ -279,8 +339,23 @@ def main():
     
     # Save results if output path specified
     if args.output:
-        with open(args.output, 'w', encoding='utf-8') as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
+        if args.output.lower().endswith('.tsv'):
+            metric_order = [
+                'BLEU-1', 'BLEU-2', 'BLEU-3', 'BLEU-4',
+                'ROUGE-L', 'METEOR', 'num_samples',
+            ]
+            with open(args.output, 'w', encoding='utf-8') as f:
+                f.write('\t'.join(metric_order) + '\n')
+                f.write(
+                    '\t'.join(
+                        f"{results[k]:.6f}" if k != 'num_samples' else str(int(results[k]))
+                        for k in metric_order
+                    )
+                    + '\n'
+                )
+        else:
+            with open(args.output, 'w', encoding='utf-8') as f:
+                json.dump(results, f, indent=2, ensure_ascii=False)
         print(f"💾 Results saved to: {args.output}")
 
 

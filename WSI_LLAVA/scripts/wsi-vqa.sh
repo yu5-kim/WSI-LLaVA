@@ -62,7 +62,7 @@ if [[ "${SKIP_VQA:-0}" != "1" ]]; then
         --conv-mode llava_v1 \
         --num-chunks 1 \
         --chunk-idx 0 \
-        --temperature 0.2 \
+        --temperature 0 \
         --patch-sample-ratio "${PATCH_SAMPLE_RATIO}" || VQA_EXIT=$?
 else
     echo "SKIP_VQA=1: model_vqa.py 건너뜀 (기존 ANSWERS_FILE로 메트릭만 계산)"
@@ -114,4 +114,3 @@ python NLP_Metric.py \
 #     --temperature 0.2 \
 #     # --top_p 0.9 \
 #     # --num_beams 4 
-

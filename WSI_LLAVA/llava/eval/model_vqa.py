@@ -115,12 +115,26 @@ def _build_user_content(cur_prompt, model):
     return DEFAULT_IMAGE_TOKEN + '\n' + cur_prompt
 
 
-def resolve_prompt_format(model_name, tokenizer, args):
+def is_llava_style_model(model_name: str, model) -> bool:
+    lowered = (model_name or "").lower()
+    if "llava" in lowered or "wsi-llava" in lowered:
+        return True
+    arch = getattr(getattr(model, "config", None), "architectures", None) or []
+    joined_arch = " ".join(str(x).lower() for x in arch)
+    if "llava" in joined_arch:
+        return True
+    return hasattr(getattr(model, "config", None), "mm_use_im_start_end")
+
+
+def resolve_prompt_format(model_name, model, tokenizer, args):
     if args.prompt_format == "qwen":
         if not hasattr(tokenizer, "apply_chat_template"):
             raise ValueError("--prompt-format qwen requires tokenizer.apply_chat_template")
         return "qwen"
     if args.prompt_format == "llava":
+        return "llava"
+    # auto mode: prefer llava-style prompt for llava checkpoints even when backbone tokenizer is qwen.
+    if is_llava_style_model(model_name, model):
         return "llava"
     if is_qwen_family(model_name, tokenizer) and hasattr(tokenizer, "apply_chat_template"):
         return "qwen"
@@ -128,7 +142,7 @@ def resolve_prompt_format(model_name, tokenizer, args):
 
 
 def build_prompt_and_stop_words(cur_prompt, model, model_name, tokenizer, args):
-    prompt_format = resolve_prompt_format(model_name, tokenizer, args)
+    prompt_format = resolve_prompt_format(model_name, model, tokenizer, args)
     qwen_mode = prompt_format == "qwen"
     user_content = _build_user_content(cur_prompt, model)
 
@@ -401,7 +415,7 @@ if __name__ == "__main__":
         type=str,
         default="auto",
         choices=["auto", "llava", "qwen"],
-        help="Prompt format selection. auto chooses qwen template when a Qwen tokenizer/model is detected.",
+        help="Prompt format selection. auto prefers llava format for llava-style checkpoints, otherwise uses qwen template when detected.",
     )
     parser.add_argument(
         "--dump-decode-stages",

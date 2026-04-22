@@ -28,6 +28,26 @@ def load_image(image_files):
     return image
 
 
+def sample_patch_features(image, patch_sample_ratio):
+    if patch_sample_ratio is None or patch_sample_ratio >= 1.0:
+        return image
+
+    if patch_sample_ratio < 0 or patch_sample_ratio > 1:
+        raise ValueError(f"patch_sample_ratio must be in [0, 1], got {patch_sample_ratio}")
+
+    if not isinstance(image, torch.Tensor) or image.ndim == 0 or image.shape[0] == 0:
+        return image
+
+    num_patches = image.shape[0]
+    sampled_patch_count = max(1, math.ceil(num_patches * patch_sample_ratio))
+    if sampled_patch_count >= num_patches:
+        return image
+
+    sampled_indices = torch.randperm(num_patches, device=image.device)[:sampled_patch_count]
+    sampled_indices, _ = torch.sort(sampled_indices)
+    return image.index_select(0, sampled_indices)
+
+
 def eval_model(args):
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
@@ -36,17 +56,17 @@ def eval_model(args):
         model_path, args.model_base, model_name
     )
 
-    # ===== 1️⃣ 读取问题文件 =====
+    # ===== 1. Load question file =====
     questions = [json.loads(q) for q in open(os.path.expanduser(args.question_file), "r")]
     questions = get_chunk(questions, args.num_chunks, args.chunk_idx)
 
-    # ===== 2️⃣ 检查并加载已存在的输出文件 =====
+    # ===== 2. Check and load existing output file =====
     answers_file = os.path.expanduser(args.answers_file)
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
 
     processed_ids = set()
     if os.path.exists(answers_file) and os.path.getsize(answers_file) > 0:
-        print(f"🔄 检测到已存在结果文件：{answers_file}")
+        print(f"Existing results file detected: {answers_file}")
         with open(answers_file, "r") as f:
             for line in f:
                 try:
@@ -54,17 +74,17 @@ def eval_model(args):
                     processed_ids.add(data["question_id"])
                 except:
                     continue
-        print(f"✅ 已处理 {len(processed_ids)} 条，将跳过这些样本。")
-        ans_file = open(answers_file, "a")  # 追加模式
+        print(f"Skipping {len(processed_ids)} already processed samples.")
+        ans_file = open(answers_file, "a")  # append mode
     else:
         ans_file = open(answers_file, "w")
-        print(f"🆕 新建结果文件：{answers_file}")
+        print(f"Creating new results file: {answers_file}")
 
-    # ===== 3️⃣ 遍历问题列表 =====
-    for line in tqdm(questions, desc="推理中"):
+    # ===== 3. Iterate over question list =====
+    for line in tqdm(questions, desc="Inference"):
         idx = line["question_id"]
         if idx in processed_ids:
-            continue  # 跳过已完成的样本
+            continue  # skip already processed samples
 
         image_file = line["image"]
         qs = line["question"]
@@ -88,6 +108,7 @@ def eval_model(args):
 
         image_path = os.path.join(args.image_folder, image_file)
         image = load_image(image_path)
+        image = sample_patch_features(image, args.patch_sample_ratio)
         image_tensor = image.to(model.device, dtype=torch.float16)
 
         with torch.inference_mode():
@@ -118,7 +139,7 @@ def eval_model(args):
         ans_file.flush()
 
     ans_file.close()
-    print("✅ 所有样本推理完成！")
+    print("All samples inference completed.")
 
 
 if __name__ == "__main__":
@@ -134,6 +155,9 @@ if __name__ == "__main__":
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--top_p", type=float, default=None)
     parser.add_argument("--num_beams", type=int, default=1)
+    parser.add_argument("--patch-sample-ratio", type=float, default=1.0,
+                        help="Ratio of patch features to sample per slide during evaluation. "
+                             "Use 1.0 to keep all patches.")
     args = parser.parse_args()
 
     eval_model(args)

@@ -141,7 +141,7 @@ class LlavaMetaForCausalLM(ABC):
         image_features = self.get_model().get_vision_tower()(images)
     
         image_features = self.get_model().mm_projector(image_features)
-        print(f"Image features shape after mm: {image_features.shape}")  # 打印图像特征的形状
+        # print(f"Image features shape after mm: {image_features.shape}")  # 打印图像特征的形状
         # time.sleep(2)  # 延迟 1 秒
         return image_features
 

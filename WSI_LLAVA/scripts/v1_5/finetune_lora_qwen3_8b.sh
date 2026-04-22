@@ -1,15 +1,11 @@
 #!/usr/bin/env bash
-# Stage3만 (LoRA). Stage2 mm_projector.bin 미로드. LLM: Qwen3 (WSI-LLaVA Qwen 분기).
-# 데이터·설정: finetune_lora_stage3_only_last.sh 와 동일 (LLaVA576 last-layer JSON + 동일 feature 폴더).
-# 레포 루트: bash WSI_LLAVA/scripts/v1_5/finetune_lora_qwen3.sh
+# Stage3만 (LoRA). Stage2 mm_projector.bin 미로드. LLM: Qwen3-8B (WSI-LLaVA Qwen 분기).
+# 데이터·설정: finetune_lora_qwen3.sh 와 동일.
+# 레포 루트: bash WSI_LLAVA/scripts/v1_5/finetune_lora_qwen3_8b.sh
 #
-# 메모리: 576 비전 토큰 + 텍스트로 Vicuna 스크립트와 동일 micro-batch(32)는 보통 OOM.
-# 아래는 micro-batch 8 / accum 16 → GPU당 Vicuna 대비 동일한 "노드당" 스텝 합(32×4 ≈ 8×16).
-# 더 필요하면 PER_DEVICE_TRAIN_BATCH_SIZE=4 GRADIENT_ACCUMULATION_STEPS=32 로 실행.
-#
-# GPU 지정: 미설정 시 보이는 GPU 전부 사용. 예)
-#   CUDA_VISIBLE_DEVICES=0 bash WSI_LLAVA/scripts/v1_5/finetune_lora_qwen3.sh
-#   CUDA_VISIBLE_DEVICES=4 MASTER_PORT=29514 bash ...   # 다른 job과 포트 분리
+# GPU 지정 예)
+#   CUDA_VISIBLE_DEVICES=0 bash WSI_LLAVA/scripts/v1_5/finetune_lora_qwen3_8b.sh
+#   CUDA_VISIBLE_DEVICES=4 MASTER_PORT=29518 bash ...
 
 set -euo pipefail
 
@@ -21,23 +17,20 @@ REPORT_TO="${REPORT_TO:-wandb}"
 
 IMAGE_FOLDER="/dataset/data/slide_spatial_features/ps512/conch_v1_5_titan/TCGA_yu5kim_WSI_LLaVA"
 DATA_PATH="/dataset/personal/yu5kim/WSI-LLaVA/WSI-Bench/WSI-Bench-train_filtered_llava576_paths_last.json"
-OUTPUT_DIR="${REPO_ROOT}/checkpoints_4gpu_3e/wsi_llava_qwen3_4b_lora_last_stage3only"
+OUTPUT_DIR="${REPO_ROOT}/checkpoints_4gpu_3e/wsi_llava_qwen3_8b_lora_last_stage3only"
 
-NUM_TRAIN_EPOCHS=3
+NUM_TRAIN_EPOCHS="${NUM_TRAIN_EPOCHS:-3}"
+# NUM_TRAIN_EPOCHS=0.1
 SAVE_TOTAL_LIMIT=1
 PER_DEVICE_TRAIN_BATCH_SIZE="${PER_DEVICE_TRAIN_BATCH_SIZE:-8}"
 GRADIENT_ACCUMULATION_STEPS="${GRADIENT_ACCUMULATION_STEPS:-16}"
 
-PER_DEVICE_TRAIN_BATCH_SIZE=16
-GRADIENT_ACCUMULATION_STEPS=8
-
-
-MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-/dataset/model/Qwen3/Qwen3-4B}"
+MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-/dataset/model/Qwen3/Qwen3-8B}"
 VISION_TOWER="${VISION_TOWER:-/dataset/data/raw/WSIBench/clip-vit-large-patch14-336}"
 
 cd "${REPO_ROOT}" || exit 1
 
-deepspeed --master_port "${MASTER_PORT:-29507}" "${REPO_ROOT}/WSI_LLAVA/llava/train/train_mem.py" \
+deepspeed --master_port "${MASTER_PORT:-29517}" "${REPO_ROOT}/WSI_LLAVA/llava/train/train_mem.py" \
     --lora_enable True --lora_r 128 --lora_alpha 256 --mm_projector_lr 2e-5 \
     --deepspeed "${REPO_ROOT}/WSI_LLAVA/scripts/zero3.json" \
     --llm_backbone qwen3 \

@@ -1084,7 +1084,7 @@ class DataCollatorForSupervisedDataset(object):
             else:
                 batch['images'] = images
         self.batch_count += 1  # 每次调用时增加计数
-        print(f"Processing batch count: {self.batch_count}")  # 输出当前批次数
+        # print(f"Processing batch count: {self.batch_count}")  # 输出当前批次数
         return batch
 
 

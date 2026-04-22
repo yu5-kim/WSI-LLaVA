@@ -116,6 +116,38 @@ We apologize for the oversight and appreciate your understanding.
 
 If you plan to replace the LLaVA language backbone with Qwen3, see the migration design document: [docs/qwen3_migration_plan.md](docs/qwen3_migration_plan.md).
 
+### Merge Qwen LoRA into a single checkpoint for evaluation
+
+If you trained with LoRA on a Qwen backbone, you can merge adapter weights into one standalone model using the same merge utility.
+`merge_lora_weights.py` imports the LLaVA model builder, so the LLaVA package from this repository must be importable even when the language backbone is Qwen3:
+
+```bash
+export PYTHONPATH=/path/to/WSI-LLaVA/WSI_LLAVA:$PYTHONPATH
+python /path/to/WSI-LLaVA/WSI_LLAVA/scripts/merge_lora_weights.py \
+  --model-path /path/to/qwen_lora_checkpoint \
+  --model-base /path/to/Qwen3-4B \
+  --save-model-path /path/to/qwen_merged_model
+```
+
+Or, if your current directory is `WSI_LLAVA/`:
+
+```bash
+python scripts/merge_lora_weights.py \
+  --model-path /path/to/qwen_lora_checkpoint \
+  --model-base /path/to/Qwen3-4B \
+  --save-model-path /path/to/qwen_merged_model
+```
+
+Then evaluate with the merged model path (set `--model-base` empty or omit it in your eval script if not required):
+
+```bash
+python WSI_LLAVA/llava/eval/model_vqa_loader.py \
+  --model-path /path/to/qwen_merged_model \
+  --question-file /path/to/questions.jsonl \
+  --image-folder /path/to/features \
+  --answers-file /path/to/predictions.jsonl
+```
+
 ---
 
 ## 🏗️ Architecture

@@ -105,6 +105,7 @@ def eval_model(args):
         input_ids = tokenizer_image_token(
             prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt'
         ).unsqueeze(0).cuda()
+        attention_mask = torch.ones_like(input_ids, dtype=torch.long, device=input_ids.device)
 
         image_path = os.path.join(args.image_folder, image_file)
         image = load_image(image_path)
@@ -114,6 +115,7 @@ def eval_model(args):
         with torch.inference_mode():
             output_ids = model.generate(
                 input_ids,
+                attention_mask=attention_mask,
                 images=image_tensor.unsqueeze(0).half().cuda(),
                 image_sizes=[image.size],
                 do_sample=True if args.temperature > 0 else False,

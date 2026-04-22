@@ -3,6 +3,13 @@ export PYTHONPATH=./WSI_LLAVA
 export CUDA_VISIBLE_DEVICES=6
 
 # 리포 루트(WSI-LLaVA)에서 실행 권장: ./WSI_LLAVA/scripts/wsi-vqa.sh
+#
+# Qwen3/WSI LLaVA 머지 체크포인트: model_vqa.py가 토크나이저를 보고 자동으로
+#   apply_chat_template(..., add_generation_prompt=True) + train의 preprocess_qwen_chat_template
+#   경로를 쓰므로, 아래 --conv-mode llava_v1 은 무시됩니다(경고만 출력).
+# LLaMA/Mistral 등 비-Qwen은 --conv-mode 가 그대로 적용됩니다.
+# 디버그(프롬프트·디코드 3단계) 예: DEBUG_DECODE=WSI-Bench/debug_qwen_decode.jsonl DEBUG_MAX=5 ./WSI_LLAVA/scripts/wsi-vqa.sh
+#   (스크립트 맨 아래 python에 --debug-decode "$DEBUG_DECODE" --debug-decode-max "$DEBUG_MAX" 를 넣어 사용)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
@@ -46,15 +53,25 @@ ANSWERS_FILE="WSI-Bench/Results/WSI-Bench-Report-only-Qwen3_4B_Instruct_2507_lor
 
 # 한 번만 쓸 비율 (기본 1.0 = 전체 패치). 예: PATCH_SAMPLE_RATIO=0.05 ./WSI_LLAVA/scripts/wsi-vqa.sh
 PATCH_SAMPLE_RATIO="${PATCH_SAMPLE_RATIO:-1.0}"
+# 선택: Qwen 추론 디버그 jsonl (미설정 시 비활성)
+DEBUG_DECODE="${DEBUG_DECODE:-}"
+DEBUG_DECODE_MAX="${DEBUG_DECODE_MAX:-0}"
 
 echo "patch_sample_ratio=${PATCH_SAMPLE_RATIO}"
 echo "answers: ${ANSWERS_FILE}"
+if [[ -n "${DEBUG_DECODE}" ]]; then
+    echo "debug_decode: ${DEBUG_DECODE} (max=${DEBUG_DECODE_MAX})"
+fi
 
 cd "${REPO_ROOT}" || exit 1
 
 VQA_EXIT=0
 if [[ "${SKIP_VQA:-0}" != "1" ]]; then
-    CUDA_LAUNCH_BLOCKING=1 python WSI_LLAVA/llava/eval/model_vqa.py \
+    _DD_ARGS=()
+    if [[ -n "${DEBUG_DECODE}" ]]; then
+        _DD_ARGS+=(--debug-decode "${DEBUG_DECODE}" --debug-decode-max "${DEBUG_DECODE_MAX}")
+    fi
+    python WSI_LLAVA/llava/eval/model_vqa.py \
         --model-path "${MODEL_PATH}" \
         --image-folder "${IMAGE_FOLDER}" \
         --question-file "${QUESTION_FILE}" \
@@ -63,7 +80,8 @@ if [[ "${SKIP_VQA:-0}" != "1" ]]; then
         --num-chunks 1 \
         --chunk-idx 0 \
         --temperature 0 \
-        --patch-sample-ratio "${PATCH_SAMPLE_RATIO}" || VQA_EXIT=$?
+        --patch-sample-ratio "${PATCH_SAMPLE_RATIO}" \
+        "${_DD_ARGS[@]}" || VQA_EXIT=$?
 else
     echo "SKIP_VQA=1: model_vqa.py 건너뜀 (기존 ANSWERS_FILE로 메트릭만 계산)"
 fi

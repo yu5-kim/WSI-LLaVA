@@ -46,8 +46,10 @@ ANSWERS_FILE="WSI-Bench/Results/WSI-Bench-Report-only-Qwen3_4B_Instruct_2507_lor
 
 # 한 번만 쓸 비율 (기본 1.0 = 전체 패치). 예: PATCH_SAMPLE_RATIO=0.05 ./WSI_LLAVA/scripts/wsi-vqa.sh
 PATCH_SAMPLE_RATIO="${PATCH_SAMPLE_RATIO:-1.0}"
+PROMPT_DEBUG_LIMIT="${PROMPT_DEBUG_LIMIT:-0}"
 
 echo "patch_sample_ratio=${PATCH_SAMPLE_RATIO}"
+echo "prompt_debug_limit=${PROMPT_DEBUG_LIMIT}"
 echo "answers: ${ANSWERS_FILE}"
 
 cd "${REPO_ROOT}" || exit 1
@@ -63,7 +65,8 @@ if [[ "${SKIP_VQA:-0}" != "1" ]]; then
         --num-chunks 1 \
         --chunk-idx 0 \
         --temperature 0 \
-        --patch-sample-ratio "${PATCH_SAMPLE_RATIO}" || VQA_EXIT=$?
+        --patch-sample-ratio "${PATCH_SAMPLE_RATIO}" \
+        --prompt-debug-limit "${PROMPT_DEBUG_LIMIT}" || VQA_EXIT=$?
 else
     echo "SKIP_VQA=1: model_vqa.py 건너뜀 (기존 ANSWERS_FILE로 메트릭만 계산)"
 fi

@@ -138,6 +138,10 @@ class DataArguments:
     is_multimodal: bool = False
     image_folder: Optional[str] = field(default=None)
     image_aspect_ratio: str = 'square'
+    prompt_debug_limit: int = field(
+        default=0,
+        metadata={"help": "Print up to N serialized training prompts for debugging."},
+    )
 
 
 @dataclass
@@ -426,6 +430,7 @@ def preprocess_qwen_chat_template(
     has_image: bool = False,
 ) -> Dict:
     input_ids_list, labels_list = [], []
+    debug_prompts = []
     image_anchor_counts, image_insert_counts = [], []
     image_token_for_serializer = _qwen_image_token_for_serializer(data_args)
 
@@ -468,12 +473,14 @@ def preprocess_qwen_chat_template(
 
         input_ids_list.append(cur_input_ids)
         labels_list.append(cur_labels)
+        debug_prompts.append(serialized_prompt)
         image_anchor_counts.append(len(anchor_positions))
         image_insert_counts.append(int((cur_input_ids == IMAGE_TOKEN_INDEX).sum().item()))
 
     return dict(
         input_ids=input_ids_list,
         labels=labels_list,
+        debug_prompts=debug_prompts,
         image_anchor_counts=image_anchor_counts,
         image_insert_counts=image_insert_counts,
     )
@@ -775,6 +782,7 @@ def preprocess_qwen_v1(
     return dict(
         input_ids=input_ids,
         labels=targets,
+        debug_prompts=conversations,
     )
 
 
@@ -958,6 +966,7 @@ class LazySupervisedDataset(Dataset):
         self.list_data_dict = list_data_dict
         self.data_args = data_args
         self._qwen_anchor_debug_count = 0
+        self._prompt_debug_count = 0
 
     def __len__(self):
         return len(self.list_data_dict)
@@ -1050,6 +1059,19 @@ class LazySupervisedDataset(Dataset):
                 f"match={anchor_count == insert_count}"
             )
             self._qwen_anchor_debug_count += 1
+        if (
+            isinstance(getattr(self.data_args, "prompt_debug_limit", 0), int)
+            and self.data_args.prompt_debug_limit > 0
+            and self._prompt_debug_count < self.data_args.prompt_debug_limit
+            and "debug_prompts" in data_dict
+        ):
+            prompt_text = data_dict["debug_prompts"][0]
+            sample_id = self.list_data_dict[i].get("id", f"idx_{i}")
+            print(
+                f"[Train Prompt Debug {self._prompt_debug_count + 1}/{self.data_args.prompt_debug_limit}] "
+                f"sample={sample_id}\n{prompt_text}\n"
+            )
+            self._prompt_debug_count += 1
         if isinstance(i, int):
             data_dict = dict(input_ids=data_dict["input_ids"][0],
                              labels=data_dict["labels"][0])

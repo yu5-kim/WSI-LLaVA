@@ -198,6 +198,8 @@ def eval_model(args):
         ans_file = open(answers_file, "w")
         print(f"Creating new results file: {answers_file}")
 
+    debug_count = 0
+
     # ===== 3. Iterate over question list =====
     for line in tqdm(questions, desc="Inference"):
         idx = line["question_id"]
@@ -213,6 +215,11 @@ def eval_model(args):
         prompt, stop_words, qwen_mode = build_prompt_and_stop_words(
             cur_prompt, model, model_name, tokenizer, args
         )
+        if args.prompt_debug_limit > 0 and debug_count < args.prompt_debug_limit:
+            print(
+                f"[Eval Prompt Debug {debug_count + 1}/{args.prompt_debug_limit}] "
+                f"question_id={idx}, qwen_mode={qwen_mode}\n{prompt}\n"
+            )
 
         input_ids = tokenizer_image_token(
             prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt'
@@ -252,6 +259,9 @@ def eval_model(args):
         if qwen_mode:
             outputs = re.sub(r"^\s*(assistant|ASSISTANT|Assistant)\s*:\s*", "", outputs)
         outputs = trim_generated_answer(outputs)
+        if args.prompt_debug_limit > 0 and debug_count < args.prompt_debug_limit:
+            print(f"[Eval Output Debug {debug_count + 1}/{args.prompt_debug_limit}] question_id={idx}\n{outputs}\n")
+            debug_count += 1
 
         ans_id = shortuuid.uuid()
         ans_file.write(json.dumps({
@@ -286,6 +296,8 @@ if __name__ == "__main__":
     parser.add_argument("--patch-sample-ratio", type=float, default=1.0,
                         help="Ratio of patch features to sample per slide during evaluation. "
                              "Use 1.0 to keep all patches.")
+    parser.add_argument("--prompt-debug-limit", type=int, default=0,
+                        help="Print up to N eval prompts/outputs for debugging.")
     args = parser.parse_args()
 
     eval_model(args)

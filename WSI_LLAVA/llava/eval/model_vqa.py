@@ -87,6 +87,19 @@ def trim_generated_answer(text):
     return "\n".join(cleaned_lines).strip()
 
 
+def trim_at_stop_strings(text, stop_strings):
+    if not text:
+        return text
+    cut_pos = len(text)
+    for marker in stop_strings or []:
+        if not marker:
+            continue
+        pos = text.find(marker)
+        if pos != -1:
+            cut_pos = min(cut_pos, pos)
+    return text[:cut_pos].strip()
+
+
 def is_qwen_family(model_name: str, tokenizer) -> bool:
     lowered = (model_name or "").lower()
     if any(k in lowered for k in ("qwen3", "qwen2", "qwen")):
@@ -96,10 +109,30 @@ def is_qwen_family(model_name: str, tokenizer) -> bool:
     return "qwen" in tok_name or "qwen" in tok_class
 
 
+def _build_user_content(cur_prompt, model):
+    if model.config.mm_use_im_start_end:
+        return DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + cur_prompt
+    return DEFAULT_IMAGE_TOKEN + '\n' + cur_prompt
+
+
+def resolve_prompt_format(model_name, tokenizer, args):
+    if args.prompt_format == "qwen":
+        if not hasattr(tokenizer, "apply_chat_template"):
+            raise ValueError("--prompt-format qwen requires tokenizer.apply_chat_template")
+        return "qwen"
+    if args.prompt_format == "llava":
+        return "llava"
+    if is_qwen_family(model_name, tokenizer) and hasattr(tokenizer, "apply_chat_template"):
+        return "qwen"
+    return "llava"
+
+
 def build_prompt_and_stop_words(cur_prompt, model, model_name, tokenizer, args):
-    qwen_mode = is_qwen_family(model_name, tokenizer) and hasattr(tokenizer, "apply_chat_template")
+    prompt_format = resolve_prompt_format(model_name, tokenizer, args)
+    qwen_mode = prompt_format == "qwen"
+    user_content = _build_user_content(cur_prompt, model)
+
     if qwen_mode:
-        user_content = f"{DEFAULT_IMAGE_TOKEN}\n{cur_prompt}"
         messages = [{"role": "user", "content": user_content}]
         prompt = tokenizer.apply_chat_template(
             messages,
@@ -114,16 +147,13 @@ def build_prompt_and_stop_words(cur_prompt, model, model_name, tokenizer, args):
             "\nTASK:",
             "USER:",
             "ASSISTANT:",
+            "<|im_end|>",
+            "<|endoftext|>",
         ]
-        return prompt, stop_words, qwen_mode
-
-    if model.config.mm_use_im_start_end:
-        qs = DEFAULT_IM_START_TOKEN + DEFAULT_IMAGE_TOKEN + DEFAULT_IM_END_TOKEN + '\n' + cur_prompt
-    else:
-        qs = DEFAULT_IMAGE_TOKEN + '\n' + cur_prompt
+        return prompt, stop_words, qwen_mode, prompt_format
 
     conv = conv_templates[args.conv_mode].copy()
-    conv.append_message(conv.roles[0], qs)
+    conv.append_message(conv.roles[0], user_content)
     conv.append_message(conv.roles[1], None)
     prompt = conv.get_prompt()
 
@@ -138,7 +168,7 @@ def build_prompt_and_stop_words(cur_prompt, model, model_name, tokenizer, args):
         "\nQUESTION:",
         "\nTASK:",
     ])
-    return prompt, stop_words, qwen_mode
+    return prompt, stop_words, qwen_mode, prompt_format
 
 
 def resolve_generation_eos_and_pad(model, tokenizer):
@@ -164,6 +194,23 @@ def resolve_generation_eos_and_pad(model, tokenizer):
         pad_token_id = eos_ids[0]
 
     return eos_token_id, pad_token_id
+
+
+def slice_generated_tokens(output_ids, input_ids):
+    if output_ids.ndim != 2 or input_ids.ndim != 2:
+        raise ValueError(
+            f"Expected 2D tensors for output_ids/input_ids, got {output_ids.shape}, {input_ids.shape}"
+        )
+    if output_ids.shape[0] != input_ids.shape[0]:
+        raise ValueError(
+            f"Batch mismatch between output_ids ({output_ids.shape[0]}) and input_ids ({input_ids.shape[0]})"
+        )
+    prompt_token_len = input_ids.shape[1]
+    if output_ids.shape[1] < prompt_token_len:
+        raise ValueError(
+            f"Generated sequence shorter than prompt: output={output_ids.shape[1]}, prompt={prompt_token_len}"
+        )
+    return output_ids[:, prompt_token_len:]
 
 
 def eval_model(args):
@@ -199,6 +246,7 @@ def eval_model(args):
         print(f"Creating new results file: {answers_file}")
 
     # ===== 3. Iterate over question list =====
+    prompt_format_logged = False
     for line in tqdm(questions, desc="Inference"):
         idx = line["question_id"]
         if idx in processed_ids:
@@ -210,9 +258,12 @@ def eval_model(args):
         Tanswer = line["T-answer"]
 
         cur_prompt = qs
-        prompt, stop_words, qwen_mode = build_prompt_and_stop_words(
+        prompt, stop_words, qwen_mode, prompt_format = build_prompt_and_stop_words(
             cur_prompt, model, model_name, tokenizer, args
         )
+        if not prompt_format_logged:
+            print(f"[prompt-format] selected={prompt_format}")
+            prompt_format_logged = True
 
         input_ids = tokenizer_image_token(
             prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt'
@@ -247,8 +298,9 @@ def eval_model(args):
                 stopping_criteria=stopping_criteria,
             )
 
-        generated_ids = output_ids[:, input_ids.shape[1]:]
+        generated_ids = slice_generated_tokens(output_ids, input_ids)
         outputs = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        outputs = trim_at_stop_strings(outputs, stop_words)
         if qwen_mode:
             outputs = re.sub(r"^\s*(assistant|ASSISTANT|Assistant)\s*:\s*", "", outputs)
         outputs = trim_generated_answer(outputs)
@@ -283,6 +335,13 @@ if __name__ == "__main__":
     parser.add_argument("--num_beams", type=int, default=1)
     parser.add_argument("--max_new_tokens", type=int, default=512)
     parser.add_argument("--repetition_penalty", type=float, default=1.1)
+    parser.add_argument(
+        "--prompt-format",
+        type=str,
+        default="auto",
+        choices=["auto", "llava", "qwen"],
+        help="Prompt format selection. auto chooses qwen template when a Qwen tokenizer/model is detected.",
+    )
     parser.add_argument("--patch-sample-ratio", type=float, default=1.0,
                         help="Ratio of patch features to sample per slide during evaluation. "
                              "Use 1.0 to keep all patches.")
